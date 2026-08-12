@@ -42,6 +42,7 @@ Optional but recommended:
 7. For WhatsApp, configure the official WhatsApp Cloud API and set `WHATSAPP_ACCESS_TOKEN` plus `WHATSAPP_PHONE_NUMBER_ID`.
 8. Set `JARVIS_SOCIAL_MODEL` if you want the social agent to use a different OpenAI model than the main Jarvis brain.
 9. Set `YOUTUBE_API_KEY` if you want higher-quality YouTube phone playback selection.
+6. Set `YOUTUBE_API_KEY` if you want higher-quality YouTube phone playback selection.
 
 ## Run
 
