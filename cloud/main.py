@@ -2,6 +2,7 @@ import os
 import sqlite3
 import time
 import secrets
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -85,16 +86,27 @@ def memory_snapshot(limit: int = 30):
     return {k: v for k, v in rows}
 
 
-def cloud_brain(message: str, memories: dict) -> str:
+def cloud_brain(message: str, memories: dict) -> dict:
     system = (
-        "You are Jarvis, the user's personal AI. You are the cloud brain shared by the user's phone and PC. "
-        "Be concise, natural, and personalized. The cloud can handle conversation, memory, reminders, weather, "
-        "social-media strategy, and routing. Never claim the cloud can directly control a Windows PC unless a connected "
-        "PC agent is present. If a request requires a device, clearly identify the required device."
+        "You are Jarvis Cloud, the shared personal AI brain for the user's phone and PC. "
+        "Return ONLY valid JSON with keys mode and reply. mode must be exactly 'chat' or 'pc_action'. "
+        "Use 'pc_action' when the user is asking to open/control/debug/read/change something on the Windows PC, "
+        "or any task that needs local files, applications, mouse, keyboard, OCR, screen vision, or other PC-only tools. "
+        "Use 'chat' for normal conversation, planning, memory discussion, social-media discussion, weather discussion, "
+        "translation questions, or anything that can be answered without direct PC access. "
+        "For pc_action, reply should briefly acknowledge and say the PC agent will execute it. "
+        "For chat, answer naturally and concisely. Never claim a PC action was completed from the cloud alone."
     )
-    prompt = f"LONG-TERM MEMORY:\n{memories}\n\nUSER:\n{message}"
+    prompt = f"LONG-TERM MEMORY:\n{json.dumps(memories, ensure_ascii=False)}\n\nUSER:\n{message}"
     response = client.responses.create(model=MODEL, instructions=system, input=prompt)
-    return response.output_text.strip()
+    raw = (response.output_text or "").strip()
+    try:
+        parsed = json.loads(raw)
+        if parsed.get("mode") not in {"chat", "pc_action"}:
+            raise ValueError("invalid mode")
+        return {"mode": parsed["mode"], "reply": str(parsed.get("reply", ""))}
+    except Exception:
+        return {"mode": "chat", "reply": raw or "I'm here, boss."}
 
 
 @app.get("/")
@@ -126,8 +138,8 @@ def ask(payload: AskRequest, authorization: Optional[str] = Header(default=None)
     if not x_device_id:
         raise HTTPException(status_code=400, detail="X-Device-ID header is required")
     sid = get_or_create_session(payload.session_id, x_device_id)
-    answer = cloud_brain(payload.message, memory_snapshot())
-    return {"ok": True, "session_id": sid, "reply": answer, "device_id": x_device_id}
+    result = cloud_brain(payload.message, memory_snapshot())
+    return {"ok": True, "session_id": sid, "mode": result["mode"], "reply": result["reply"], "device_id": x_device_id}
 
 
 @app.get("/memory")
@@ -140,5 +152,8 @@ def get_memory(authorization: Optional[str] = Header(default=None)):
 def set_memory(payload: MemoryRequest, authorization: Optional[str] = Header(default=None)):
     authenticate(authorization.replace("Bearer ", "", 1) if authorization else None)
     with db() as conn:
-        conn.execute("INSERT INTO memory(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (payload.key, payload.value, int(time.time())))
+        conn.execute(
+            "INSERT INTO memory(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+            (payload.key, payload.value, int(time.time())),
+        )
     return {"ok": True, "key": payload.key}
