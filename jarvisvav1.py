@@ -58,6 +58,10 @@ import subprocess
 import datetime
 import asyncio
 import urllib.parse
+import uuid
+import hashlib
+import hmac
+import socket
 
 try:
     import speech_recognition as sr
@@ -368,6 +372,9 @@ async def _play_segment(text: str, is_hindi: bool):
         pygame.mixer.music.set_volume(1.0)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
+            if keyboard and keyboard.is_pressed("esc"):
+                pygame.mixer.music.stop()
+                break
             pygame.time.wait(20)
         pygame.mixer.music.unload()
     except Exception as err:
@@ -380,8 +387,10 @@ async def _play_segment(text: str, is_hindi: bool):
             pass
 
 
-def speak(text: str):
+def speak(text: str, force: bool = False):
     print(f"Jarvis: {text}")
+    if JARVIS_CONFIG.get("quiet_mode") and not force:
+        return
     if not edge_tts or not pygame:
         print("[TTS Error] Please install edge-tts and pygame.")
         return
@@ -524,6 +533,44 @@ def undo_last_action() -> str:
 # PERSISTENT MEMORY (survives closing/reopening Jarvis)
 # ---------------------------------------------------------------------------
 MEMORY_FILE = os.path.join(os.path.expanduser("~"), "jarvis_memory.json")
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), "jarvis_config.json")
+STATE_FILE = os.path.join(os.path.expanduser("~"), "jarvis_state.json")
+DEVICE_FILE = os.path.join(os.path.expanduser("~"), "jarvis_devices.json")
+AUTOSTART_NAME = "JarvisPersonalAI"
+
+DEFAULT_CONFIG = {
+    "start_with_windows": True,
+    "background_mode": True,
+    "quiet_mode": False,
+    "proactive_enabled": True,
+    "proactive_frequency": "balanced",
+    "voice_personality": "warm futuristic",
+    "preferred_name": "boss",
+    "awareness_poll_seconds": 20,
+    "device_network_enabled": True,
+    "device_network_port": 8765,
+}
+
+def load_config() -> dict:
+    data = dict(DEFAULT_CONFIG)
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data.update(loaded)
+        except Exception as e:
+            print(f"[Config load error] {e}")
+    return data
+
+def save_config():
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(JARVIS_CONFIG, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Config save error] {e}")
+
+JARVIS_CONFIG = load_config()
 
 
 def load_memory() -> dict:
@@ -533,15 +580,22 @@ def load_memory() -> dict:
                 data = json.load(f)
                 data.setdefault("facts", {})
                 data.setdefault("history", [])
+                data.setdefault("profile", {})
+                data.setdefault("preferences", {})
+                data.setdefault("routines", {})
+                data.setdefault("projects", {})
+                data.setdefault("tasks", [])
+                data.setdefault("conversation_summaries", [])
                 return data
         except Exception as e:
             print(f"[Memory load error] {e}")
-    return {"facts": {}, "history": []}
+    return {"facts": {}, "history": [], "profile": {}, "preferences": {}, "routines": {}, "projects": {}, "tasks": [], "conversation_summaries": []}
 
 
 def save_memory():
     try:
         MEMORY_DATA["history"] = CONVO_HISTORY
+        MEMORY_DATA["last_saved_at"] = datetime.datetime.now().isoformat(timespec="seconds")
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             json.dump(MEMORY_DATA, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -564,6 +618,52 @@ def recall_fact(key: str) -> str:
     if value:
         return f"{key}: {value}"
     return f"I don't have anything saved for '{key}'."
+
+
+def remember_personal_context(category: str, key: str, value: str) -> str:
+    """Store long-term personal context beyond simple facts."""
+    category = (category or "facts").strip().lower()
+    if category not in {"profile", "preferences", "routines", "projects", "facts"}:
+        category = "facts"
+    if is_sensitive_text(key) or is_sensitive_text(value):
+        return "I can remember useful personal context, but not passwords, OTPs, tokens, or other secrets."
+    MEMORY_DATA.setdefault(category, {})[key.strip().lower()] = {"value": value, "updated_at": datetime.datetime.now().isoformat(timespec="seconds")}
+    save_memory()
+    return f"Remembered under {category}: {key} is {value}."
+
+def add_task_memory(task: str, status: str = "open") -> str:
+    if is_sensitive_text(task):
+        return "I won't store that because it looks sensitive."
+    task_item = {"id": str(uuid.uuid4())[:8], "task": task.strip(), "status": status, "updated_at": datetime.datetime.now().isoformat(timespec="seconds")}
+    MEMORY_DATA.setdefault("tasks", []).append(task_item)
+    MEMORY_DATA["tasks"] = MEMORY_DATA["tasks"][-50:]
+    SESSION_MEMORY["current_task"] = task.strip()
+    save_memory()
+    return f"Saved task {task_item['id']}: {task}."
+
+def continue_last_task() -> str:
+    open_tasks = [t for t in MEMORY_DATA.get("tasks", []) if t.get("status") != "done"]
+    if open_tasks:
+        task = open_tasks[-1]
+        SESSION_MEMORY["current_task"] = task.get("task", "")
+        return f"We left off with: {task.get('task')}"
+    if SESSION_MEMORY.get("current_task"):
+        return f"We were working on: {SESSION_MEMORY['current_task']}"
+    return "I don't have an unfinished task saved yet."
+
+def set_quiet_mode(enabled: bool) -> str:
+    JARVIS_CONFIG["quiet_mode"] = bool(enabled)
+    save_config()
+    return "Quiet mode on. I'll stay silent unless you wake me or something critical happens." if enabled else "Quiet mode off. I'll speak up only when useful."
+
+def set_proactive_frequency(frequency: str) -> str:
+    frequency = (frequency or "balanced").lower()
+    if frequency not in {"low", "balanced", "high"}:
+        frequency = "balanced"
+    JARVIS_CONFIG["proactive_frequency"] = frequency
+    JARVIS_CONFIG["proactive_enabled"] = frequency != "low" or JARVIS_CONFIG.get("proactive_enabled", True)
+    save_config()
+    return f"Proactive personality set to {frequency}."
 
 
 # ---------------------------------------------------------------------------
@@ -1361,7 +1461,77 @@ def context_snapshot() -> str:
         "current_task": SESSION_MEMORY.get("current_task", ""),
         "recent_actions": SESSION_MEMORY.get("recent_actions", [])[-5:],
         "visual_notes": SESSION_MEMORY.get("visual_notes", [])[-3:],
+        "personal_memory": {k: MEMORY_DATA.get(k, {}) for k in ("profile", "preferences", "routines", "projects")},
+        "open_tasks": [t for t in MEMORY_DATA.get("tasks", []) if t.get("status") != "done"][-5:],
+        "quiet_mode": JARVIS_CONFIG.get("quiet_mode"),
+        "proactive_frequency": JARVIS_CONFIG.get("proactive_frequency"),
+        "device_network": DEVICE_DATA.get("devices", {}) if "DEVICE_DATA" in globals() else {},
+        "background_state": SESSION_MEMORY.get("background_state", {}),
     }, ensure_ascii=False)
+
+
+
+def save_background_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(SESSION_MEMORY, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[State save error] {e}")
+
+def seconds_since_user_input() -> int:
+    if sys.platform != "win32":
+        return 0
+    class LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+    try:
+        lii = LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
+        millis = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
+        return max(0, int(millis / 1000))
+    except Exception:
+        return 0
+
+def awareness_snapshot() -> dict:
+    idle_seconds = seconds_since_user_input()
+    return {
+        "time": datetime.datetime.now().isoformat(timespec="seconds"),
+        "active_window": get_active_window_title(),
+        "idle_seconds": idle_seconds,
+        "activity": "idle" if idle_seconds >= 300 else "active",
+        "current_task": SESSION_MEMORY.get("current_task", ""),
+        "last_action": SESSION_MEMORY.get("recent_actions", [])[-1:] or [],
+    }
+
+def awareness_watcher():
+    last_window = ""
+    while True:
+        time.sleep(max(10, int(JARVIS_CONFIG.get("awareness_poll_seconds", 20))))
+        snap = awareness_snapshot()
+        SESSION_MEMORY["background_state"] = snap
+        if snap["active_window"] != last_window:
+            last_window = snap["active_window"]
+            remember_session_note("recent_actions", f"active window: {last_window}")
+        save_background_state()
+
+def install_windows_autostart() -> str:
+    if sys.platform != "win32":
+        return "Autostart registry setup is only available on Windows."
+    script = os.path.abspath(__file__)
+    cmd = f'"{sys.executable}" "{script}" --background'
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+        winreg.CloseKey(key)
+        return "Jarvis will start automatically with Windows."
+    except Exception as e:
+        return f"Couldn't set Windows autostart: {e}"
+
+def ensure_autostart():
+    if JARVIS_CONFIG.get("start_with_windows"):
+        result = install_windows_autostart()
+        print(f"[Autostart] {result}")
 
 def ocr_screen_layout() -> str:
     """OCR with approximate word positions, useful for clicking buttons before using vision."""
@@ -1581,6 +1751,62 @@ def switch_voice(mode: str) -> str:
     return f"Switched to the {mode} voice."
 
 
+
+# ---------------------------------------------------------------------------
+# JARVIS DEVICE NETWORK (lightweight authenticated presence/command routing)
+# ---------------------------------------------------------------------------
+
+def _device_secret() -> str:
+    secret = os.getenv("JARVIS_DEVICE_SECRET")
+    if secret:
+        return secret
+    seed = os.path.expanduser("~") + socket.gethostname()
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+def _device_token(payload: str) -> str:
+    return hmac.new(_device_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def load_devices() -> dict:
+    if os.path.exists(DEVICE_FILE):
+        try:
+            with open(DEVICE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("devices", {})
+            return data
+        except Exception as e:
+            print(f"[Device load error] {e}")
+    return {"identity": "jarvis", "devices": {}}
+
+def save_devices(data: dict):
+    try:
+        with open(DEVICE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Device save error] {e}")
+
+DEVICE_DATA = load_devices()
+
+def update_device_presence(name: str, kind: str, status: str, capabilities=None) -> str:
+    DEVICE_DATA.setdefault("devices", {})[name] = {
+        "kind": kind,
+        "status": status,
+        "capabilities": capabilities or [],
+        "last_seen": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    save_devices(DEVICE_DATA)
+    return f"{name} is {status}."
+
+def device_status() -> str:
+    update_device_presence(socket.gethostname(), "pc", "online", ["computer_control", "voice", "memory", "screen", "files"])
+    phone = "configured" if PHONE_IP else "not configured"
+    devices = DEVICE_DATA.get("devices", {})
+    return f"Jarvis network: phone bridge {phone}; devices: " + ", ".join(f"{n}={d.get('status')}" for n, d in devices.items())
+
+def route_device_command(command: str, capability: str = "") -> str:
+    if capability in {"phone", "android", "mobile"} or "phone" in command.lower():
+        return "I'll route that through the Android companion bridge when the phone is reachable."
+    return "This PC can handle that command locally; if it can't, I'll fall back to a connected device."
+
 # ---------------------------------------------------------------------------
 # NOVA'S BRAIN: tool-calling dispatch
 # ---------------------------------------------------------------------------
@@ -1606,6 +1832,8 @@ If a tool returns text extracted from the screen or a PDF, relay it clearly and 
 For everything else, don't just repeat a tool's raw output robotically - acknowledge what
 happened in your own natural words. If nothing needs doing, just have a normal conversation -
 jokes, opinions, whatever fits; you can refer back to things said earlier in this session.
+
+You have a persistent personal memory/profile and should sound personalized, not generic. Use remembered preferences, routines, projects, unfinished tasks, device presence, quiet mode, and the user's communication style when relevant. You may proactively mention useful things, but never chatter without a reason.
 
 You receive a compact local CONTEXT snapshot on each turn. Use it to resolve "this", "that",
 "the second one", visible screen references, clipboard references, and recent-task follow-ups.
@@ -1723,6 +1951,15 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"message": {"type": "string"}, "tone": {"type": "string"}}, "required": ["message"]}}},
     {"type": "function", "function": {"name": "translate_screen_overlay", "description": "OCR visible screen text, translate it, and show a lightweight HUD overlay.",
         "parameters": {"type": "object", "properties": {"target_language": {"type": "string"}}}}},
+    {"type": "function", "function": {"name": "remember_personal_context", "description": "Store long-term profile, preference, routine, project, or fact memory.",
+        "parameters": {"type": "object", "properties": {"category": {"type": "string", "enum": ["profile", "preferences", "routines", "projects", "facts"]}, "key": {"type": "string"}, "value": {"type": "string"}}, "required": ["category", "key", "value"]}}},
+    {"type": "function", "function": {"name": "add_task_memory", "description": "Remember an unfinished/current task so Jarvis can continue later.",
+        "parameters": {"type": "object", "properties": {"task": {"type": "string"}, "status": {"type": "string"}}, "required": ["task"]}}},
+    {"type": "function", "function": {"name": "continue_last_task", "description": "Recall where the user and Jarvis left off.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "set_quiet_mode", "description": "Enable or disable quiet mode.", "parameters": {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"]}}},
+    {"type": "function", "function": {"name": "set_proactive_frequency", "description": "Set proactive frequency/personality: low, balanced, high.", "parameters": {"type": "object", "properties": {"frequency": {"type": "string", "enum": ["low", "balanced", "high"]}}, "required": ["frequency"]}}},
+    {"type": "function", "function": {"name": "device_status", "description": "Show Jarvis device network status/presence.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "route_device_command", "description": "Route a command to PC, phone, or future device based on capability.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "capability": {"type": "string"}}, "required": ["command"]}}},
 
 ]
 
@@ -1737,7 +1974,7 @@ SIMPLE_ACTION_TOOLS = {
     "draw_circle_paint", "draw_rectangle_paint", "draw_line_paint", "draw_scenery_paint", "control_brightness" ,
     "get_weather", "fill_area", "draw_freehand", "add_text_paint",
     "paint_undo", "paint_redo", "clear_canvas", "save_paint_drawing", "open_app_on_phone", "phone_volume", "take_phone_screenshot", "play_youtube_on_phone",
-    "play_content_on_phone", "click_ui_target", "system_diagnostics", "translate_screen_overlay" ,
+    "play_content_on_phone", "click_ui_target", "system_diagnostics", "translate_screen_overlay", "remember_personal_context", "add_task_memory", "continue_last_task", "set_quiet_mode", "set_proactive_frequency", "device_status", "route_device_command" ,
 }
 
 TOOL_FUNCTIONS = {
@@ -1790,6 +2027,13 @@ TOOL_FUNCTIONS = {
     "system_diagnostics": lambda a: system_diagnostics(),
     "draft_whatsapp_reply": lambda a: draft_whatsapp_reply(a.get("message", ""), a.get("tone", "friendly")),
     "translate_screen_overlay": lambda a: translate_screen_overlay(a.get("target_language", "Hindi")),
+    "remember_personal_context": lambda a: remember_personal_context(a.get("category", "facts"), a.get("key", ""), a.get("value", "")),
+    "add_task_memory": lambda a: add_task_memory(a.get("task", ""), a.get("status", "open")),
+    "continue_last_task": lambda a: continue_last_task(),
+    "set_quiet_mode": lambda a: set_quiet_mode(a.get("enabled", True)),
+    "set_proactive_frequency": lambda a: set_proactive_frequency(a.get("frequency", "balanced")),
+    "device_status": lambda a: device_status(),
+    "route_device_command": lambda a: route_device_command(a.get("command", ""), a.get("capability", "")),
 }
 
 
@@ -1950,17 +2194,19 @@ def _mark_said_today(key: str):
     _proactive_said_today[key] = datetime.date.today().isoformat()
 
 def check_battery_proactive():
-    if not psutil:
+    if not psutil or not JARVIS_CONFIG.get("proactive_enabled", True):
         return
     batt = psutil.sensors_battery()
     if batt and not batt.power_plugged and batt.percent <= 15 and not _already_said_today("low_battery"):
-        speak(f"Your battery's at {int(batt.percent)} percent. Might want to plug in.")
+        speak(f"{JARVIS_CONFIG.get('preferred_name', 'boss').title()}, your laptop battery is at {int(batt.percent)} percent. Might want to plug in.", force=True)
         _mark_said_today("low_battery")
 
 def check_morning_greeting():
+    if not JARVIS_CONFIG.get("proactive_enabled", True) or JARVIS_CONFIG.get("quiet_mode"):
+        return
     hour = datetime.datetime.now().hour
-    if 6 <= hour < 11 and not _already_said_today("morning"):
-        speak("Morning. I'm up and listening if you need anything.")
+    if 6 <= hour < 11 and JARVIS_CONFIG.get("proactive_frequency") != "low" and not _already_said_today("morning"):
+        speak("Morning. I'm running quietly in the background if you need anything.")
         _mark_said_today("morning")
 
 PROACTIVE_CHECKS = [check_battery_proactive, check_morning_greeting]
@@ -1978,8 +2224,15 @@ def proactive_watcher():
 
 def main():
     global DICTATION_MODE
+    ensure_autostart()
+    update_device_presence(socket.gethostname(), "pc", "online", ["computer_control", "voice", "memory", "screen", "files"])
+    threading.Thread(target=awareness_watcher, daemon=True).start()
     briefing = morning_briefing()
-    speak(f"Hi boss! {briefing} Jarvis online - just talk to me normally.")
+    if "--background" in sys.argv or JARVIS_CONFIG.get("background_mode", True):
+        set_status("sleeping", "background ready")
+        print(f"Jarvis background online. {briefing}")
+    else:
+        speak(f"Hi boss! {briefing} Jarvis online - just talk to me normally.")
 
     asleep = True
     last_active_at = 0
@@ -1993,7 +2246,8 @@ def main():
             if not asleep and (silent_rounds >= SILENT_ROUNDS_BEFORE_SLEEP or time.time() - last_active_at > ACTIVE_CONVERSATION_SECONDS):
                 asleep = True
                 set_status("sleeping", "say Jarvis")
-                speak("Going quiet. Say Jarvis when you need me.")
+                if not JARVIS_CONFIG.get("quiet_mode"):
+                    speak("Going quiet. Say Jarvis when you need me.")
             continue
 
         silent_rounds = 0
@@ -2037,6 +2291,20 @@ def main():
                 speak("Dictation off.")
                 continue
             type_text(text + " ")  # trailing space so sentences don't run together
+            continue
+
+        lowered_text = text.strip().lower()
+        if lowered_text in ("i'm leaving", "im leaving", "jarvis i'm leaving", "i am leaving"):
+            set_quiet_mode(True)
+            add_task_memory("User stepped away; resume the previous context when they return.")
+            speak("Got it. Quiet mode on, and I'll remember where we left off.", force=True)
+            continue
+        if lowered_text in ("i'm going to sleep", "im going to sleep", "good night", "going to sleep"):
+            set_quiet_mode(True)
+            speak("Good night. I'll stay quiet and keep the essentials watched.", force=True)
+            continue
+        if "where did we leave off" in lowered_text or "continue what we were doing" in lowered_text:
+            speak(continue_last_task(), force=True)
             continue
 
         # Everything else goes through Jarvis's brain
