@@ -16,6 +16,7 @@ A Windows-7-friendly, low-overhead personal assistant upgraded from the existing
 - Universal dictation via clipboard paste, preserving Hindi/Hinglish text.
 - **Phone-first Android companion architecture:** ADB bridge for apps, volume, screenshots, media/YouTube content, URLs, battery/info and safe dialer handoff.
 - **Jarvis device network foundation:** shared identity file, authenticated HMAC token helper, device presence/status, persistent reconnect-friendly state, and command-routing stubs for PHONE ↔ PC ↔ future devices.
+- **Autonomous social-media agent:** official Meta Graph/Instagram and WhatsApp Cloud API integration points, MANUAL/APPROVAL/AUTONOMOUS modes, safe content planning, post history, insights snapshots, reply moderation, audit logging, and protected bio/message workflows.
 - Safe WhatsApp reply drafting boundary: drafts only, explicit review required before sending.
 - PDF text extraction, larger document context, and scanned-PDF OCR boundary/fallback messaging.
 - Live translation boundary: OCR screen text, translate with OpenAI, show a lightweight HUD overlay.
@@ -37,6 +38,10 @@ Optional but recommended:
 3. Set `OPENAI_API_KEY` in your environment or `.env` for GPT/vision/translation.
 4. Set `PHONE_ADB_IP` after pairing Android ADB over Wi-Fi.
 5. Set `JARVIS_DEVICE_SECRET` to the same strong secret on every Jarvis device that should share the trusted network identity.
+6. For Instagram, connect an Instagram Professional account through Meta OAuth and set `INSTAGRAM_ACCESS_TOKEN` plus `INSTAGRAM_ACCOUNT_ID`.
+7. For WhatsApp, configure the official WhatsApp Cloud API and set `WHATSAPP_ACCESS_TOKEN` plus `WHATSAPP_PHONE_NUMBER_ID`.
+8. Set `JARVIS_SOCIAL_MODEL` if you want the social agent to use a different OpenAI model than the main Jarvis brain.
+9. Set `YOUTUBE_API_KEY` if you want higher-quality YouTube phone playback selection.
 6. Set `YOUTUBE_API_KEY` if you want higher-quality YouTube phone playback selection.
 
 ## Run
@@ -55,12 +60,29 @@ python jarvisvav1.py --background
 
 ## Personal commands
 
+- “Jarvis, create today's Instagram post.” plans the content, caption, hashtags, posting time and visual prompt.
+- “Jarvis, analyze yesterday's performance.” fetches supported Instagram Graph API insights and saves the snapshot.
+- “Jarvis, make a meme based on today's trend.” creates a safe Indian-relatable post concept and caption; attach a public media URL for API publishing.
+- “Jarvis, prepare three posts for this week.” drafts a week plan in the local social database.
+- “Jarvis, enter autonomous Instagram mode.” enables autonomous publishing only for supported API actions with configured media URLs and hard safety blocks.
+- “Jarvis, show me what you posted.” reads recent published/draft history from `~/jarvis_social_agent.json`.
+- “Jarvis, turn Instagram automation off.” disables Instagram automation.
 - “Jarvis, remember this …” stores safe long-term context through the personal memory tools.
 - “Jarvis, remind me later …” or “remember this task …” saves an open task.
 - “Jarvis, continue what we were doing” and “Jarvis, where did we leave off?” recall unfinished work.
 - “Jarvis, I’m leaving” enables quiet mode and preserves the current context.
 - “Jarvis, I’m going to sleep” enables quiet mode and keeps only essential proactive checks.
 - “Jarvis, quiet mode off” or proactive-frequency requests are handled by the tool-calling brain.
+
+## Social-media safety and API boundaries
+
+- Instagram uses official Meta Graph API endpoints for supported Professional account media publishing and insights.
+- WhatsApp uses the official WhatsApp Business/Cloud API only; no private or unofficial WhatsApp APIs are used.
+- Tokens are never hardcoded; keep them in environment variables or a secure local secret manager.
+- MANUAL mode drafts only, APPROVAL mode prepares everything and requires approval before publishing/sending, and AUTONOMOUS mode can publish/send only supported, configured, policy-safe actions.
+- Deleting content, changing credentials/settings, financial actions, mass messaging, suspicious activity, WhatsApp sends, and bio changes are protected by hard confirmation/safety gates.
+- Jarvis does not claim access to Meta's private algorithm or a private Meta AI API; trending music and “Meta AI” trend suggestions are handled as safe recommendations unless official APIs expose the capability.
+- All social actions are logged to `~/jarvis_social_audit.jsonl`.
 
 ## Configuration files
 
@@ -70,6 +92,8 @@ Jarvis keeps lightweight local state in your home directory:
 - `~/jarvis_memory.json` — profile, preferences, routines, projects, facts, open tasks and conversation history.
 - `~/jarvis_state.json` — current lightweight awareness snapshot.
 - `~/jarvis_devices.json` — device presence and shared Jarvis identity metadata.
+- `~/jarvis_social_agent.json` — Instagram/WhatsApp drafts, post history, insight snapshots, message drafts and strategy notes.
+- `~/jarvis_social_audit.jsonl` — append-only social action audit log.
 
 ## Windows 7 / low-end hardware notes
 

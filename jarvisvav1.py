@@ -536,6 +536,8 @@ MEMORY_FILE = os.path.join(os.path.expanduser("~"), "jarvis_memory.json")
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "jarvis_config.json")
 STATE_FILE = os.path.join(os.path.expanduser("~"), "jarvis_state.json")
 DEVICE_FILE = os.path.join(os.path.expanduser("~"), "jarvis_devices.json")
+SOCIAL_DB_FILE = os.path.join(os.path.expanduser("~"), "jarvis_social_agent.json")
+SOCIAL_AUDIT_FILE = os.path.join(os.path.expanduser("~"), "jarvis_social_audit.jsonl")
 AUTOSTART_NAME = "JarvisPersonalAI"
 
 DEFAULT_CONFIG = {
@@ -549,6 +551,18 @@ DEFAULT_CONFIG = {
     "awareness_poll_seconds": 20,
     "device_network_enabled": True,
     "device_network_port": 8765,
+    "social_agent": {
+        "mode": "APPROVAL",
+        "instagram_enabled": False,
+        "whatsapp_enabled": False,
+        "niche": "Indian relatable tech/lifestyle humor",
+        "personality": "transparent AI assistant, witty, helpful, never pretending to be human",
+        "themes": ["Indian relatable content", "productivity", "student/work life", "light tech humor"],
+        "reply_mode": "APPROVAL",
+        "max_autonomous_replies_per_hour": 5,
+        "require_approval_for_bio": True,
+        "hard_blocks": ["delete_content", "credentials", "financial", "mass_messaging", "suspicious_activity"],
+    },
 }
 
 def load_config() -> dict:
@@ -1403,7 +1417,7 @@ def explain_clipboard() -> str:
 # JARVIS STATE, SECURITY, HUD, CONTEXT, AND SCREEN INTELLIGENCE HELPERS
 # ---------------------------------------------------------------------------
 ASSISTANT_NAME = "Jarvis"
-SENSITIVE_TOOL_NAMES = {"call_person", "dial_number_on_phone", "type_on_phone"}
+SENSITIVE_TOOL_NAMES = {"call_person", "dial_number_on_phone", "type_on_phone", "send_whatsapp_message", "change_instagram_bio"}
 SENSITIVE_WORDS = {"password", "otp", "token", "secret", "api key", "credit card", "cvv", "pin"}
 SESSION_MEMORY = {"recent_actions": [], "visual_notes": [], "current_task": ""}
 _LAST_SCREEN_TEXT = ""
@@ -1467,6 +1481,7 @@ def context_snapshot() -> str:
         "proactive_frequency": JARVIS_CONFIG.get("proactive_frequency"),
         "device_network": DEVICE_DATA.get("devices", {}) if "DEVICE_DATA" in globals() else {},
         "background_state": SESSION_MEMORY.get("background_state", {}),
+        "social_agent": social_config() if "social_config" in globals() else {},
     }, ensure_ascii=False)
 
 
@@ -1807,6 +1822,245 @@ def route_device_command(command: str, capability: str = "") -> str:
         return "I'll route that through the Android companion bridge when the phone is reachable."
     return "This PC can handle that command locally; if it can't, I'll fall back to a connected device."
 
+
+
+# ---------------------------------------------------------------------------
+# AUTONOMOUS SOCIAL-MEDIA AGENT (official Meta APIs only)
+# ---------------------------------------------------------------------------
+META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v20.0")
+META_GRAPH_BASE = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
+INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID", "")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+SOCIAL_STRATEGY_MODEL = os.getenv("JARVIS_SOCIAL_MODEL", OPENAI_MODEL)
+SOCIAL_MODERATION_KEYWORDS = {
+    "spam": ["free followers", "crypto giveaway", "investment guaranteed", "click this link", "dm to earn"],
+    "toxic": ["kill yourself", "hate you", "idiot", "stupid", "scam"],
+    "unsafe": ["password", "otp", "credit card", "bank details", "send money"],
+}
+
+def load_social_db() -> dict:
+    if os.path.exists(SOCIAL_DB_FILE):
+        try:
+            with open(SOCIAL_DB_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("posts", [])
+            data.setdefault("drafts", [])
+            data.setdefault("insights", [])
+            data.setdefault("messages", [])
+            data.setdefault("strategy_notes", [])
+            return data
+        except Exception as e:
+            print(f"[Social DB load error] {e}")
+    return {"posts": [], "drafts": [], "insights": [], "messages": [], "strategy_notes": []}
+
+def save_social_db():
+    try:
+        with open(SOCIAL_DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(SOCIAL_DB, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Social DB save error] {e}")
+
+def social_audit(action: str, details: dict):
+    entry = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "action": action, "details": details}
+    try:
+        with open(SOCIAL_AUDIT_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[Social audit error] {e}")
+
+SOCIAL_DB = load_social_db()
+
+def social_config() -> dict:
+    cfg = dict(JARVIS_CONFIG.get("social_agent", {}))
+    cfg["instagram_ready"] = bool(INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_ACCOUNT_ID)
+    cfg["whatsapp_ready"] = bool(WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID)
+    return cfg
+
+def set_social_mode(platform: str, mode: str) -> str:
+    platform = (platform or "instagram").lower()
+    mode = (mode or "APPROVAL").upper()
+    if mode not in {"MANUAL", "APPROVAL", "AUTONOMOUS", "OFF"}:
+        return "Use MANUAL, APPROVAL, AUTONOMOUS, or OFF."
+    cfg = JARVIS_CONFIG.setdefault("social_agent", dict(DEFAULT_CONFIG["social_agent"]))
+    if platform == "whatsapp":
+        cfg["whatsapp_enabled"] = mode != "OFF"
+        cfg["reply_mode"] = "MANUAL" if mode == "OFF" else mode
+    else:
+        cfg["instagram_enabled"] = mode != "OFF"
+        cfg["mode"] = "MANUAL" if mode == "OFF" else mode
+    save_config()
+    social_audit("set_social_mode", {"platform": platform, "mode": mode})
+    return f"{platform.title()} automation set to {mode}."
+
+def _meta_get(path: str, params=None) -> dict:
+    if not requests:
+        return {"error": "The requests package is required."}
+    params = dict(params or {})
+    params["access_token"] = INSTAGRAM_ACCESS_TOKEN
+    try:
+        resp = requests.get(f"{META_GRAPH_BASE}/{path.lstrip('/')}", params=params, timeout=20)
+        data = resp.json()
+        if resp.status_code >= 400:
+            return {"error": data.get("error", {}).get("message", resp.text)}
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+def _meta_post(path: str, payload=None, token=None) -> dict:
+    if not requests:
+        return {"error": "The requests package is required."}
+    payload = dict(payload or {})
+    payload["access_token"] = token or INSTAGRAM_ACCESS_TOKEN
+    try:
+        resp = requests.post(f"{META_GRAPH_BASE}/{path.lstrip('/')}", data=payload, timeout=30)
+        data = resp.json()
+        if resp.status_code >= 400:
+            return {"error": data.get("error", {}).get("message", resp.text)}
+        return data
+    except Exception as e:
+        return {"error": str(e)}
+
+def analyze_instagram_performance(days: int = 7) -> str:
+    if not INSTAGRAM_ACCESS_TOKEN or not INSTAGRAM_ACCOUNT_ID:
+        return "Instagram Graph API is not configured. Set INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_ACCOUNT_ID from Meta OAuth."
+    metrics = "reach,profile_views,follower_count,website_clicks"
+    data = _meta_get(f"{INSTAGRAM_ACCOUNT_ID}/insights", {"metric": metrics, "period": "day"})
+    media = _meta_get(f"{INSTAGRAM_ACCOUNT_ID}/media", {"fields": "id,caption,media_type,permalink,timestamp,like_count,comments_count", "limit": min(50, max(5, days * 3))})
+    snapshot = {"time": datetime.datetime.now().isoformat(timespec="seconds"), "insights": data, "recent_media": media}
+    SOCIAL_DB.setdefault("insights", []).append(snapshot)
+    SOCIAL_DB["insights"] = SOCIAL_DB["insights"][-60:]
+    save_social_db()
+    social_audit("instagram_analyze", {"days": days, "ok": "error" not in data and "error" not in media})
+    if "error" in data or "error" in media:
+        return f"Instagram analysis failed: {data.get('error') or media.get('error')}"
+    best = sorted(media.get("data", []), key=lambda m: int(m.get("like_count", 0)) + int(m.get("comments_count", 0)) * 3, reverse=True)[:3]
+    best_lines = [f"{m.get('media_type')} {m.get('id')}: {m.get('like_count', 0)} likes, {m.get('comments_count', 0)} comments" for m in best]
+    return "Instagram performance saved. Top recent posts: " + ("; ".join(best_lines) or "no media returned")
+
+def _social_strategy_prompt(request: str) -> str:
+    cfg = social_config()
+    history = SOCIAL_DB.get("posts", [])[-12:] + SOCIAL_DB.get("drafts", [])[-12:]
+    return ("Create a safe Instagram content plan for a transparent AI-managed professional account. "
+            "Do not claim to be human. Focus on Indian relatable content. Include caption, hashtags, visual_prompt, "
+            "format (image/carousel/reel), suggested posting_time, reply_rules, and trending_audio_suggestion as text only. "
+            "If music is needed, suggest audio to add manually because the official API may not expose trending audio attachment.\n"
+            f"Config: {json.dumps(cfg, ensure_ascii=False)}\nHistory: {json.dumps(history, ensure_ascii=False)[:4000]}\nRequest: {request}")
+
+def generate_social_strategy(request: str) -> dict:
+    if OPENAI_API_KEY and requests:
+        messages = [{"role": "system", "content": "You are Jarvis's social-media strategist. Return compact JSON only."}, {"role": "user", "content": _social_strategy_prompt(request)}]
+        data, err = _call_openai(messages, max_tokens=900)
+        if not err:
+            raw = (data["choices"][0]["message"].get("content") or "{}").strip()
+            try:
+                return json.loads(raw.strip("` \n"))
+            except Exception:
+                return {"caption": raw[:1800], "hashtags": ["#JarvisAI", "#IndianRelatable", "#TechHumor"], "visual_prompt": request, "format": "image", "suggested_posting_time": "20:30 IST", "trending_audio_suggestion": "Pick a currently trending Instagram audio manually in-app."}
+    return {"caption": f"Built by Jarvis: {request}\n\nNot human, just your AI co-pilot thinking out loud.", "hashtags": ["#JarvisAI", "#IndianRelatable", "#AIAssistant"], "visual_prompt": f"Indian relatable meme/graphic about {request}", "format": "image", "suggested_posting_time": "20:30 IST", "trending_audio_suggestion": "Pick a currently trending Instagram audio manually in-app."}
+
+def create_instagram_post(request: str = "today's Instagram post", publish: bool = False, image_url: str = "") -> str:
+    cfg = social_config()
+    mode = cfg.get("mode", "APPROVAL")
+    if not cfg.get("instagram_enabled"):
+        return "Instagram automation is off. Say 'enter autonomous Instagram mode' or set APPROVAL/MANUAL first."
+    strategy = generate_social_strategy(request)
+    caption = (strategy.get("caption") or "").strip()
+    hashtags = strategy.get("hashtags") or []
+    if isinstance(hashtags, list):
+        caption = caption + "\n\n" + " ".join(hashtags)
+    draft = {"id": str(uuid.uuid4())[:8], "time": datetime.datetime.now().isoformat(timespec="seconds"), "request": request, "strategy": strategy, "caption": caption, "image_url": image_url, "status": "draft"}
+    if publish and mode != "AUTONOMOUS":
+        publish = False
+        draft["needs_approval"] = True
+    if publish and not image_url:
+        draft["needs_media_url"] = True
+        publish = False
+    if publish:
+        result = publish_instagram_media(caption, image_url)
+        draft["publish_result"] = result
+        draft["status"] = "published" if "Published" in result else "publish_failed"
+    SOCIAL_DB.setdefault("drafts", []).append(draft)
+    if draft["status"] == "published":
+        SOCIAL_DB.setdefault("posts", []).append(draft)
+    save_social_db()
+    social_audit("instagram_create_post", {"draft_id": draft["id"], "publish_requested": publish, "status": draft["status"]})
+    if draft["status"] == "published":
+        return f"Published Instagram post {draft['id']}. {draft.get('publish_result')}"
+    return f"Prepared Instagram draft {draft['id']} for {strategy.get('suggested_posting_time')}. Caption ready. Visual prompt: {strategy.get('visual_prompt')} Trending audio suggestion: {strategy.get('trending_audio_suggestion')}"
+
+def publish_instagram_media(caption: str, image_url: str) -> str:
+    if not INSTAGRAM_ACCESS_TOKEN or not INSTAGRAM_ACCOUNT_ID:
+        return "Instagram publishing is not configured. Set Meta OAuth access token and IG account id."
+    create = _meta_post(f"{INSTAGRAM_ACCOUNT_ID}/media", {"image_url": image_url, "caption": caption})
+    if "error" in create:
+        social_audit("instagram_publish_failed", {"stage": "create", "error": create["error"]})
+        return f"Instagram media container failed: {create['error']}"
+    creation_id = create.get("id")
+    publish = _meta_post(f"{INSTAGRAM_ACCOUNT_ID}/media_publish", {"creation_id": creation_id})
+    social_audit("instagram_publish", {"creation_id": creation_id, "result": publish})
+    if "error" in publish:
+        return f"Instagram publish failed: {publish['error']}"
+    return f"Published media id {publish.get('id')}."
+
+def show_social_history(limit: int = 10) -> str:
+    posts = SOCIAL_DB.get("posts", [])[-limit:]
+    drafts = SOCIAL_DB.get("drafts", [])[-limit:]
+    lines = [f"Published: {len(posts)} recent, Drafts: {len(drafts)} recent."]
+    for item in posts[-5:] + drafts[-5:]:
+        lines.append(f"{item.get('id')} [{item.get('status')}]: {item.get('request')} @ {item.get('time')}")
+    return "\n".join(lines)
+
+def moderate_social_text(text: str) -> str:
+    lowered = (text or "").lower()
+    hits = [kind for kind, words in SOCIAL_MODERATION_KEYWORDS.items() if any(w in lowered for w in words)]
+    return ",".join(hits) if hits else "safe"
+
+def generate_social_reply(platform: str, incoming_text: str, sender: str = "") -> str:
+    verdict = moderate_social_text(incoming_text)
+    if verdict != "safe":
+        social_audit("social_reply_blocked", {"platform": platform, "sender": sender, "verdict": verdict})
+        return f"Blocked reply draft because message looks {verdict}."
+    prompt = f"Draft a short, appropriate {platform} reply as Jarvis, an AI-managed account. Be transparent that this is AI-assisted. Message: {incoming_text}"
+    strategy = generate_social_strategy(prompt)
+    reply = strategy.get("caption", str(strategy))[:900]
+    cfg = social_config()
+    mode = cfg.get("reply_mode", "APPROVAL") if platform == "whatsapp" else cfg.get("mode", "APPROVAL")
+    SOCIAL_DB.setdefault("messages", []).append({"time": datetime.datetime.now().isoformat(timespec="seconds"), "platform": platform, "sender": sender, "incoming": incoming_text, "reply": reply, "mode": mode})
+    save_social_db()
+    social_audit("social_reply_draft", {"platform": platform, "sender": sender, "mode": mode})
+    return f"Reply draft ({mode}): {reply}"
+
+def send_whatsapp_message(to_number: str, message: str, confirmed: bool = False) -> str:
+    cfg = social_config()
+    if cfg.get("reply_mode") != "AUTONOMOUS" and not confirmed:
+        return "WhatsApp reply drafted only. Say confirm before sending."
+    if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        return "WhatsApp Cloud API is not configured. Set WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID."
+    verdict = moderate_social_text(message)
+    if verdict != "safe":
+        return f"I won't send that WhatsApp message because it looks {verdict}."
+    if not requests:
+        return "The requests package is required for WhatsApp Cloud API."
+    url = f"{META_GRAPH_BASE}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    payload = {"messaging_product": "whatsapp", "to": to_number, "type": "text", "text": {"body": message}}
+    try:
+        resp = requests.post(url, headers={"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}, json=payload, timeout=20)
+        data = resp.json()
+        social_audit("whatsapp_send", {"to": to_number[-4:], "status_code": resp.status_code, "result": data})
+        if resp.status_code >= 400:
+            return f"WhatsApp send failed: {data.get('error', {}).get('message', resp.text)}"
+        return "WhatsApp message sent through the official Cloud API."
+    except Exception as e:
+        return f"WhatsApp send failed: {e}"
+
+def change_instagram_bio(new_bio: str, confirmed: bool = False) -> str:
+    if not confirmed or JARVIS_CONFIG.get("social_agent", {}).get("require_approval_for_bio", True):
+        social_audit("instagram_bio_approval_required", {"bio_preview": new_bio[:120]})
+        return "Bio change prepared but blocked until explicit approval."
+    return "Instagram bio update requires a supported Meta endpoint for this account type; I will not use private or unofficial APIs."
+
 # ---------------------------------------------------------------------------
 # NOVA'S BRAIN: tool-calling dispatch
 # ---------------------------------------------------------------------------
@@ -1838,8 +2092,7 @@ You have a persistent personal memory/profile and should sound personalized, not
 You receive a compact local CONTEXT snapshot on each turn. Use it to resolve "this", "that",
 "the second one", visible screen references, clipboard references, and recent-task follow-ups.
 For screen/UI work, prefer OCR/layout and keyboard shortcuts first; use vision only when OCR is
-insufficient. Never send messages, spend money, delete data, call people, or perform sensitive
-actions without explicit user confirmation."""
+insufficient. Never send messages, spend money, delete data, call people, change credentials/settings, mass-message, delete content, or perform sensitive actions without explicit user confirmation. For Instagram/WhatsApp, use official Meta APIs only, never claim access to private ranking algorithms, never pretend to be human, and treat collab requests as notify-the-user events."""
 
 TOOLS = [
     {"type": "function", "function": {"name": "open_application", "description": "Open an installed desktop app by name (Chrome, Notepad, or anything found in the Start Menu).",
@@ -1960,6 +2213,13 @@ TOOLS = [
     {"type": "function", "function": {"name": "set_proactive_frequency", "description": "Set proactive frequency/personality: low, balanced, high.", "parameters": {"type": "object", "properties": {"frequency": {"type": "string", "enum": ["low", "balanced", "high"]}}, "required": ["frequency"]}}},
     {"type": "function", "function": {"name": "device_status", "description": "Show Jarvis device network status/presence.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "route_device_command", "description": "Route a command to PC, phone, or future device based on capability.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "capability": {"type": "string"}}, "required": ["command"]}}},
+    {"type": "function", "function": {"name": "set_social_mode", "description": "Set Instagram or WhatsApp automation mode: MANUAL, APPROVAL, AUTONOMOUS, or OFF.", "parameters": {"type": "object", "properties": {"platform": {"type": "string", "enum": ["instagram", "whatsapp"]}, "mode": {"type": "string", "enum": ["MANUAL", "APPROVAL", "AUTONOMOUS", "OFF"]}}, "required": ["platform", "mode"]}}},
+    {"type": "function", "function": {"name": "create_instagram_post", "description": "Plan/create today's Instagram post, meme, carousel/reel concept, caption, hashtags, schedule and optional publish via official Graph API when autonomous and media URL are available.", "parameters": {"type": "object", "properties": {"request": {"type": "string"}, "publish": {"type": "boolean"}, "image_url": {"type": "string"}}}}},
+    {"type": "function", "function": {"name": "analyze_instagram_performance", "description": "Fetch Instagram account/media insights through the official Graph API and save performance history.", "parameters": {"type": "object", "properties": {"days": {"type": "integer"}}}}},
+    {"type": "function", "function": {"name": "show_social_history", "description": "Show recent Instagram posts/drafts stored by Jarvis.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}}},
+    {"type": "function", "function": {"name": "generate_social_reply", "description": "Draft a safe Instagram/WhatsApp DM/comment reply with spam/toxic/unsafe filtering.", "parameters": {"type": "object", "properties": {"platform": {"type": "string"}, "incoming_text": {"type": "string"}, "sender": {"type": "string"}}, "required": ["platform", "incoming_text"]}}},
+    {"type": "function", "function": {"name": "send_whatsapp_message", "description": "Send a WhatsApp message using the official WhatsApp Cloud API only after confirmation or autonomous reply mode.", "parameters": {"type": "object", "properties": {"to_number": {"type": "string"}, "message": {"type": "string"}, "confirmed": {"type": "boolean"}}, "required": ["to_number", "message"]}}},
+    {"type": "function", "function": {"name": "change_instagram_bio", "description": "Prepare a trend/audience based bio update; requires explicit approval and never changes credentials/settings.", "parameters": {"type": "object", "properties": {"new_bio": {"type": "string"}, "confirmed": {"type": "boolean"}}, "required": ["new_bio"]}}},
 
 ]
 
@@ -1974,7 +2234,7 @@ SIMPLE_ACTION_TOOLS = {
     "draw_circle_paint", "draw_rectangle_paint", "draw_line_paint", "draw_scenery_paint", "control_brightness" ,
     "get_weather", "fill_area", "draw_freehand", "add_text_paint",
     "paint_undo", "paint_redo", "clear_canvas", "save_paint_drawing", "open_app_on_phone", "phone_volume", "take_phone_screenshot", "play_youtube_on_phone",
-    "play_content_on_phone", "click_ui_target", "system_diagnostics", "translate_screen_overlay", "remember_personal_context", "add_task_memory", "continue_last_task", "set_quiet_mode", "set_proactive_frequency", "device_status", "route_device_command" ,
+    "play_content_on_phone", "click_ui_target", "system_diagnostics", "translate_screen_overlay", "remember_personal_context", "add_task_memory", "continue_last_task", "set_quiet_mode", "set_proactive_frequency", "device_status", "route_device_command", "set_social_mode", "create_instagram_post", "analyze_instagram_performance", "show_social_history", "generate_social_reply", "change_instagram_bio" ,
 }
 
 TOOL_FUNCTIONS = {
@@ -2034,6 +2294,13 @@ TOOL_FUNCTIONS = {
     "set_proactive_frequency": lambda a: set_proactive_frequency(a.get("frequency", "balanced")),
     "device_status": lambda a: device_status(),
     "route_device_command": lambda a: route_device_command(a.get("command", ""), a.get("capability", "")),
+    "set_social_mode": lambda a: set_social_mode(a.get("platform", "instagram"), a.get("mode", "APPROVAL")),
+    "create_instagram_post": lambda a: create_instagram_post(a.get("request", "today's Instagram post"), a.get("publish", False), a.get("image_url", "")),
+    "analyze_instagram_performance": lambda a: analyze_instagram_performance(a.get("days", 7)),
+    "show_social_history": lambda a: show_social_history(a.get("limit", 10)),
+    "generate_social_reply": lambda a: generate_social_reply(a.get("platform", "instagram"), a.get("incoming_text", ""), a.get("sender", "")),
+    "send_whatsapp_message": lambda a: send_whatsapp_message(a.get("to_number", ""), a.get("message", ""), a.get("confirmed", False)),
+    "change_instagram_bio": lambda a: change_instagram_bio(a.get("new_bio", ""), a.get("confirmed", False)),
 }
 
 
