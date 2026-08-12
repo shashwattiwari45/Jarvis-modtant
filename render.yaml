@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: jarvis-cloud
+    runtime: python
+    rootDir: cloud
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: JARVIS_CLOUD_SECRET
+        sync: false
+      - key: JARVIS_CLOUD_MODEL
+        value: gpt-5-mini
+      - key: JARVIS_CLOUD_DB
+        value: /var/data/jarvis_cloud.db
+    disk:
+      name: jarvis-cloud-data
+      mountPath: /var/data
+      sizeGB: 1
