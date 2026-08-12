@@ -1,7 +1,7 @@
 """
-NOVA - AI Voice Assistant (Tool-Calling Architecture)
+JARVIS - AI Voice Assistant (Tool-Calling Architecture)
 ------------------------------------------------------
-Nova no longer works by matching your sentence against a big list of fixed
+Jarvis no longer works by matching your sentence against a big list of fixed
 trigger phrases. Instead, every non-trivial thing you say goes to GPT-5-mini,
 which decides - using OpenAI's function/tool calling - which action(s) to run
 (if any), with what parameters, based on natural phrasing. It also keeps a
@@ -10,7 +10,7 @@ a stateless command parser.
 
 Only two things are still handled instantly, without an API call at all:
   - "stop" / "exit" / "quit"          -> quits immediately, no network round trip
-  - sleep / "wake up nova" handling   -> pure local state, zero cost
+  - sleep / "wake up jarvis" handling   -> pure local state, zero cost
 
 Everything else - opening/closing apps, Zoom/Chrome control, volume, reading
 the screen or a PDF, general chat, whatever - goes through Nova's "brain":
@@ -59,9 +59,18 @@ import datetime
 import asyncio
 import urllib.parse
 
-import speech_recognition as sr
-import requests
-from PIL import ImageGrab
+try:
+    import speech_recognition as sr
+except ImportError:
+    sr = None
+try:
+    import requests
+except ImportError:
+    requests = None
+try:
+    from PIL import ImageGrab
+except ImportError:
+    ImageGrab = None
 
 try:
     import pytesseract
@@ -117,14 +126,18 @@ import tkinter as tk
 # CONFIGURATION
 # ---------------------------------------------------------------------------
 
-from dotenv import load_dotenv
-from openai import OpenAI
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = lambda: None
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 load_dotenv()
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if OpenAI else None
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODEL = "gpt-5-mini"   # real model id - "gpt-5o-mini" does NOT exist
@@ -247,7 +260,7 @@ def phone_volume(direction: str) -> str:
 def take_phone_screenshot() -> str:
     if not PHONE_IP:
         return "Phone IP isn't configured."
-    remote = "/sdcard/nova_screenshot.png"
+    remote = "/sdcard/jarvis_screenshot.png"
     local = os.path.join(os.path.expanduser("~"), "Pictures", "phone_screenshot.png")
     _adb("screencap", "-p", remote)
     subprocess.run(["adb", "-s", PHONE_IP, "pull", remote, local], capture_output=True, timeout=15)
@@ -368,7 +381,7 @@ async def _play_segment(text: str, is_hindi: bool):
 
 
 def speak(text: str):
-    print(f"Nova: {text}")
+    print(f"Jarvis: {text}")
     if not edge_tts or not pygame:
         print("[TTS Error] Please install edge-tts and pygame.")
         return
@@ -403,16 +416,21 @@ def speak(text: str):
 # ---------------------------------------------------------------------------
 # SPEECH TO TEXT (Google Speech Recognition)
 # ---------------------------------------------------------------------------
-recognizer = sr.Recognizer()
-recognizer.pause_threshold = 0.7
-recognizer.non_speaking_duration = 0.4
-recognizer.dynamic_energy_threshold = True
-recognizer.dynamic_energy_adjustment_damping = 0.15
-recognizer.dynamic_energy_ratio = 1.5
+recognizer = sr.Recognizer() if sr else None
+if recognizer:
+    recognizer.pause_threshold = 0.7
+    recognizer.non_speaking_duration = 0.4
+    recognizer.dynamic_energy_threshold = True
+    recognizer.dynamic_energy_adjustment_damping = 0.15
+    recognizer.dynamic_energy_ratio = 1.5
 
 
 def listen() -> str:
     global CURRENT_LANG
+    if not sr or not recognizer:
+        print("[STT Error] Install SpeechRecognition and PyAudio for voice input.")
+        time.sleep(1)
+        return ""
     with AUDIO_LOCK, sr.Microphone() as source:
         recognizer.adjust_for_ambient_noise(source, duration=0.4)
         print("Listening... (speak now)")
@@ -503,9 +521,9 @@ def undo_last_action() -> str:
     return "Undid the last action."
 
 # ---------------------------------------------------------------------------
-# PERSISTENT MEMORY (survives closing/reopening Nova)
+# PERSISTENT MEMORY (survives closing/reopening Jarvis)
 # ---------------------------------------------------------------------------
-MEMORY_FILE = os.path.join(os.path.expanduser("~"), "nova_memory.json")
+MEMORY_FILE = os.path.join(os.path.expanduser("~"), "jarvis_memory.json")
 
 
 def load_memory() -> dict:
@@ -534,6 +552,8 @@ MEMORY_DATA = load_memory()
 
 
 def remember_fact(key: str, value: str) -> str:
+    if is_sensitive_text(key) or is_sensitive_text(value):
+        return "I can remember preferences and facts, but not passwords, OTPs, tokens, or other secrets."
     MEMORY_DATA["facts"][key.strip().lower()] = value
     save_memory()
     return f"Got it, I'll remember that {key} is {value}."
@@ -548,7 +568,7 @@ def recall_fact(key: str) -> str:
 
 # ---------------------------------------------------------------------------
 # APP AUTO-DETECTION, OPEN/CLOSE (stripped of internal speech - just do the
-# thing and return a plain description; Nova's model composes the spoken reply)
+# thing and return a plain description; Jarvis's model composes the spoken reply)
 # ---------------------------------------------------------------------------
 _app_index = {}
 _app_index_last_built = 0
@@ -700,10 +720,12 @@ def play_youtube(query: str) -> str:
 
 
 def take_screenshot() -> str:
-    folder = os.path.join(os.path.expanduser("~"), "Pictures", "NovaScreenshots")
+    folder = os.path.join(os.path.expanduser("~"), "Pictures", "JarvisScreenshots")
     os.makedirs(folder, exist_ok=True)
     filename = datetime.datetime.now().strftime("screenshot_%Y%m%d_%H%M%S.png")
     path = os.path.join(folder, filename)
+    if not ImageGrab:
+        return "Pillow ImageGrab is not available, so I could not take a screenshot."
     ImageGrab.grab().save(path)
     record_action("delete_file", path)
     return f"Saved a screenshot to {path}."
@@ -739,6 +761,8 @@ def get_time() -> str:
 def get_weather(city: str = "") -> str:
     url = f"https://wttr.in/{urllib.parse.quote(city)}?format=%C+%t+(feels+like+%f)"
     try:
+        if not requests:
+            return "The requests package is needed for weather."
         resp = requests.get(url, timeout=8, headers={"User-Agent": "curl"})  # wttr.in needs a real UA or it returns HTML
         return resp.text.strip()
     except Exception as e:
@@ -1128,6 +1152,8 @@ def ocr_screen_text() -> str:
     if not pytesseract:
         return ""
     try:
+        if not ImageGrab:
+            return ""
         img = ImageGrab.grab()
         img.thumbnail((1600, 900))
         processed = _preprocess_for_ocr(img)
@@ -1143,6 +1169,8 @@ def ocr_screen_text() -> str:
 
 
 def capture_screen_base64() -> str:
+    if not ImageGrab:
+        return ""
     img = ImageGrab.grab()
     img.thumbnail((1280, 720))
     buffer = io.BytesIO()
@@ -1154,6 +1182,8 @@ def analyze_screen(question: str = "Describe what's on my screen briefly.") -> s
     if not OPENAI_API_KEY:
         return "Need an OpenAI API key set up to analyze the screen."
     try:
+        if not requests:
+            return "The requests package is needed for OpenAI screen analysis."
         response = requests.post(
             OPENAI_API_URL,
             headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
@@ -1177,7 +1207,7 @@ def analyze_screen(question: str = "Describe what's on my screen briefly.") -> s
 def find_text_on_screen(target: str):
     """Returns (x, y) center coordinates of the first on-screen match for
     `target`, or None. Unlike ocr_screen_text(), this knows WHERE something
-    is - needed before Nova can click on it."""
+    is - needed before Jarvis can click on it."""
     if not pytesseract:
         return None
     try:
@@ -1268,6 +1298,137 @@ def explain_clipboard() -> str:
     return copied[:1200]
 
 
+
+# ---------------------------------------------------------------------------
+# JARVIS STATE, SECURITY, HUD, CONTEXT, AND SCREEN INTELLIGENCE HELPERS
+# ---------------------------------------------------------------------------
+ASSISTANT_NAME = "Jarvis"
+SENSITIVE_TOOL_NAMES = {"call_person", "dial_number_on_phone", "type_on_phone"}
+SENSITIVE_WORDS = {"password", "otp", "token", "secret", "api key", "credit card", "cvv", "pin"}
+SESSION_MEMORY = {"recent_actions": [], "visual_notes": [], "current_task": ""}
+_LAST_SCREEN_TEXT = ""
+_HUD_ROOT = None
+_HUD_LABEL = None
+
+def is_sensitive_text(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(word in lowered for word in SENSITIVE_WORDS)
+
+def set_status(state: str, detail: str = ""):
+    """Lightweight Windows-7-friendly status HUD; silently degrades in headless/non-GUI runs."""
+    print(f"[Jarvis:{state}] {detail}".strip())
+    global _HUD_ROOT, _HUD_LABEL
+    try:
+        if _HUD_ROOT is None:
+            _HUD_ROOT = tk.Tk()
+            _HUD_ROOT.overrideredirect(True)
+            _HUD_ROOT.attributes("-topmost", True)
+            _HUD_ROOT.geometry("360x44+20+20")
+            _HUD_ROOT.configure(bg="#06121f")
+            _HUD_LABEL = tk.Label(_HUD_ROOT, fg="#7df9ff", bg="#06121f", font=("Segoe UI", 11, "bold"))
+            _HUD_LABEL.pack(fill="both", expand=True)
+        _HUD_LABEL.config(text=f"JARVIS • {state.upper()} {detail[:80]}")
+        _HUD_ROOT.update_idletasks()
+        _HUD_ROOT.update()
+    except Exception:
+        _HUD_ROOT = None
+        _HUD_LABEL = None
+
+def remember_session_note(kind: str, text: str):
+    if text:
+        SESSION_MEMORY.setdefault(kind, []).append({"time": datetime.datetime.now().isoformat(timespec="seconds"), "text": text[:1000]})
+        SESSION_MEMORY[kind] = SESSION_MEMORY[kind][-10:]
+
+def get_active_window_title() -> str:
+    if sys.platform != "win32":
+        return "Active-window detection is only available on Windows."
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+        return buf.value or "Unknown active window"
+    except Exception as e:
+        return f"Couldn't read active window: {e}"
+
+def context_snapshot() -> str:
+    clip = explain_clipboard()
+    if len(clip) > 250:
+        clip = clip[:250] + "..."
+    return json.dumps({
+        "active_window": get_active_window_title(),
+        "clipboard": clip if clip != "The clipboard is empty." else "",
+        "current_task": SESSION_MEMORY.get("current_task", ""),
+        "recent_actions": SESSION_MEMORY.get("recent_actions", [])[-5:],
+        "visual_notes": SESSION_MEMORY.get("visual_notes", [])[-3:],
+    }, ensure_ascii=False)
+
+def ocr_screen_layout() -> str:
+    """OCR with approximate word positions, useful for clicking buttons before using vision."""
+    if not pytesseract:
+        return "OCR package isn't installed."
+    try:
+        img = ImageGrab.grab()
+        img.thumbnail((1600, 900))
+        processed = _preprocess_for_ocr(img)
+        data = pytesseract.image_to_data(processed, lang="eng", output_type=pytesseract.Output.DICT)
+        screen_w, screen_h = pyautogui.size() if pyautogui else img.size
+        sx, sy = screen_w / processed.width, screen_h / processed.height
+        items = []
+        for i, word in enumerate(data.get("text", [])):
+            word = (word or "").strip()
+            if len(word) < 2:
+                continue
+            x = int((data["left"][i] + data["width"][i] / 2) * sx)
+            y = int((data["top"][i] + data["height"][i] / 2) * sy)
+            items.append(f"{word}@({x},{y})")
+        result = "; ".join(items[:120])
+        remember_session_note("visual_notes", result)
+        return result or "No readable text detected on screen."
+    except Exception as e:
+        return f"Couldn't inspect screen layout: {e}"
+
+def click_ui_target(target: str) -> str:
+    before = get_active_window_title()
+    result = click_on_text(target)
+    time.sleep(0.4)
+    after = get_active_window_title()
+    verify = "verified window changed" if before != after else "click sent; no window-title change detected"
+    remember_session_note("recent_actions", f"click {target}: {result} ({verify})")
+    return f"{result} Verification: {verify}."
+
+def system_diagnostics() -> str:
+    if not psutil:
+        return "Install psutil for CPU/RAM/battery/storage/network diagnostics."
+    cpu = psutil.cpu_percent(interval=0.3)
+    ram = psutil.virtual_memory()
+    disk = psutil.disk_usage(os.path.expanduser("~"))
+    batt = psutil.sensors_battery()
+    net = psutil.net_if_stats()
+    online = any(v.isup for v in net.values()) if net else False
+    b = f"battery {batt.percent}% ({'charging' if batt.power_plugged else 'not charging'})" if batt else "no battery reported"
+    return f"CPU {cpu}%, RAM {ram.percent}% ({ram.available//(1024**2)} MB free), storage {disk.percent}% used, network {'up' if online else 'down'}, {b}."
+
+def draft_whatsapp_reply(message: str, tone: str = "friendly") -> str:
+    if is_sensitive_text(message):
+        return "This looks sensitive, so I can draft only after you approve the context."
+    return f"Draft ({tone}): Thanks, I saw this. I'll reply properly in a moment. [Review before sending]"
+
+def translate_screen_overlay(target_language: str = "Hindi") -> str:
+    text = ocr_screen_text()
+    if not text:
+        return "Couldn't read screen text to translate."
+    if not OPENAI_API_KEY:
+        return "I can read the screen, but OPENAI_API_KEY is needed for translation."
+    messages = [{"role": "system", "content": "Translate faithfully. Preserve names, numbers, and mixed Hinglish where useful."}, {"role": "user", "content": f"Translate to {target_language}:\n{text[:2000]}"}]
+    data, err = _call_openai(messages, max_tokens=600)
+    if err:
+        return f"Translation failed: {err}"
+    translated = (data["choices"][0]["message"].get("content") or "").strip()
+    set_status("translation", translated[:120])
+    remember_session_note("visual_notes", f"translated screen: {translated[:500]}")
+    return translated
+
 # ---------------------------------------------------------------------------
 # TELEGRAM PHONE-CALL BRIDGE & ZOOM MEETING LINKS
 # ---------------------------------------------------------------------------
@@ -1280,6 +1441,8 @@ def call_person(name: str) -> str:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return "The Telegram bridge isn't configured yet."
     try:
+        if not requests:
+            return "The requests package is needed for the Telegram bridge."
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             json={"chat_id": TELEGRAM_CHAT_ID, "text": f"CALL:{number}"}, timeout=10
@@ -1297,42 +1460,26 @@ def join_meeting(name: str) -> str:
     webbrowser.open(link)
     return f"Joined the {name} meeting."
 
-# ---------------------------------------------------------------------------
-# PHONE BRIDGE - LAPTOP CONTROLS PHONE (via ADB over WiFi)
-# ---------------------------------------------------------------------------
-PHONE_IP = os.environ.get("PHONE_ADB_IP", "")  # set once you know your phone's local IP, e.g. "192.168.1.42:5555"
+# Existing ADB helpers above are reused here; duplicate bridge definitions removed.
 
-def _adb(*args) -> str:
-    if not PHONE_IP:
-        return "Phone IP isn't configured. Set PHONE_ADB_IP once you've paired via wireless debugging."
+
+def _dump_ui():
+    """Dump Android UI hierarchy through ADB; returns an ElementTree root or empty hierarchy."""
     try:
-        subprocess.run(["adb", "connect", PHONE_IP], capture_output=True, timeout=5)
-        result = subprocess.run(["adb", "-s", PHONE_IP, "shell", *args], capture_output=True, text=True, timeout=10)
-        return result.stdout.strip() or result.stderr.strip()
-    except FileNotFoundError:
-        return "ADB isn't installed or not on PATH."
+        import xml.etree.ElementTree as ET
+        _adb("uiautomator", "dump", "/sdcard/window_dump.xml")
+        raw = subprocess.run(["adb", "-s", PHONE_IP, "exec-out", "cat", "/sdcard/window_dump.xml"], capture_output=True, text=True, timeout=10)
+        return ET.fromstring(raw.stdout.strip() or "<hierarchy />")
     except Exception as e:
-        return f"Phone command failed: {e}"
+        print(f"[ADB UI dump error] {e}")
+        import xml.etree.ElementTree as ET
+        return ET.fromstring("<hierarchy />")
 
-def open_app_on_phone(package_name: str) -> str:
-    # package_name examples: "com.whatsapp", "com.google.android.youtube"
-    _adb("monkey", "-p", package_name, "-c", "android.intent.category.LAUNCHER", "1")
-    return f"Opened {package_name} on your phone."
-
-def phone_volume(direction: str) -> str:
-    key = "24" if direction == "down" else "25"  # KEYCODE_VOLUME_DOWN/UP
-    _adb("input", "keyevent", key)
-    return f"Turned phone volume {direction}."
-
-def take_phone_screenshot() -> str:
-    if not PHONE_IP:
-        return "Phone IP isn't configured."
-    remote = "/sdcard/nova_screenshot.png"
-    local = os.path.join(os.path.expanduser("~"), "Pictures", "phone_screenshot.png")
-    _adb("screencap", "-p", remote)
-    subprocess.run(["adb", "-s", PHONE_IP, "pull", remote, local], capture_output=True, timeout=15)
-    os.startfile(local)
-    return "Grabbed a screenshot from your phone."
+def _bounds_center(bounds: str):
+    nums = [int(n) for n in re.findall(r"\d+", bounds or "")]
+    if len(nums) >= 4:
+        return (nums[0] + nums[2]) // 2, (nums[1] + nums[3]) // 2
+    return 540, 960
 
 def play_youtube_on_phone(query: str) -> str:
     encoded_query = urllib.parse.quote(query)
@@ -1365,6 +1512,8 @@ def youtube_api_search(query: str, live_only: bool = False):
     if live_only:
         params["eventType"] = "live"
     try:
+        if not requests:
+            return None
         resp = requests.get("https://www.googleapis.com/youtube/v3/search", params=params, timeout=10)
         items = resp.json().get("items", [])
         if not items and live_only:
@@ -1435,7 +1584,7 @@ def switch_voice(mode: str) -> str:
 # ---------------------------------------------------------------------------
 # NOVA'S BRAIN: tool-calling dispatch
 # ---------------------------------------------------------------------------
-NOVA_SYSTEM_PROMPT = """You are Nova, a witty, warm personal voice assistant running on the
+NOVA_SYSTEM_PROMPT = """You are Jarvis, a witty, warm personal voice assistant running on the
 user's Windows laptop. Reply in the SAME language/style the user used - natural casual
 English for English, natural Hinglish (Hindi mixed with English, Devanagari script for the
 Hindi parts) if they mixed languages, proper Hindi if they spoke Hindi.
@@ -1456,7 +1605,13 @@ If a tool returns text extracted from the screen or a PDF, relay it clearly and 
 - the user needs the actual content, not your summary of it, unless they asked for a summary.
 For everything else, don't just repeat a tool's raw output robotically - acknowledge what
 happened in your own natural words. If nothing needs doing, just have a normal conversation -
-jokes, opinions, whatever fits; you can refer back to things said earlier in this session."""
+jokes, opinions, whatever fits; you can refer back to things said earlier in this session.
+
+You receive a compact local CONTEXT snapshot on each turn. Use it to resolve "this", "that",
+"the second one", visible screen references, clipboard references, and recent-task follow-ups.
+For screen/UI work, prefer OCR/layout and keyboard shortcuts first; use vision only when OCR is
+insufficient. Never send messages, spend money, delete data, call people, or perform sensitive
+actions without explicit user confirmation."""
 
 TOOLS = [
     {"type": "function", "function": {"name": "open_application", "description": "Open an installed desktop app by name (Chrome, Notepad, or anything found in the Start Menu).",
@@ -1495,7 +1650,7 @@ TOOLS = [
     {"type": "function", "function": {"name": "join_meeting", "description": "Open a saved Zoom meeting link by name.",
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
     {"type": "function", "function": {"name": "system_status", "description": "Get battery and RAM usage.", "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "switch_voice", "description": "Switch Nova's speaking voice.",
+    {"type": "function", "function": {"name": "switch_voice", "description": "Switch Jarvis's speaking voice.",
         "parameters": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["nova", "female"]}}, "required": ["mode"]}}},
     {"type": "function", "function": {"name": "open_paint", "description": "Open MS Paint, maximized and ready to draw on.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "draw_circle_paint", "description": "Draw a circle in MS Paint at the canvas center. Pick a sensible default radius (~100px) and color (black) unless the user specified otherwise - don't ask.",
@@ -1521,10 +1676,6 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
     {"type": "function", "function": {"name": "recall_fact", "description": "Look up a previously saved fact about the user by key.",
         "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}},
-        {"type": "function", "function": {"name": "remember_fact", "description": "Save a fact/preference about the user permanently (e.g. their name, favorite food, a reminder) so it persists across restarts.",
-        "parameters": {"type": "object", "properties": {"key": {"type": "string"}, "value": {"type": "string"}}, "required": ["key", "value"]}}},
-    {"type": "function", "function": {"name": "recall_fact", "description": "Look up a previously saved fact about the user by key.",
-        "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}},   
         {"type": "function", "function": {"name": "list_running_apps", "description": "List apps/processes currently running, to check if something is already open before opening or closing it.",
         "parameters": {"type": "object", "properties": {}}}}, 
         {"type": "function", "function": {"name": "click_on_text", "description": "Find a piece of text/label visible on screen (a button, menu item, etc.) and click it.",
@@ -1562,10 +1713,20 @@ TOOLS = [
     {"type": "function", "function": {"name": "take_phone_screenshot", "description": "Take a screenshot on the phone and pull it to the laptop.",
         "parameters": {"type": "object", "properties": {}}}},  
     {"type": "function", "function": {"name": "play_content_on_phone", "description": "Play any requested content on the phone's YouTube - news, bhajans, music genres, workout playlists, comedy, cricket, cartoons, or anything else the user asks for by category or description. Use this instead of play_youtube_on_phone whenever the request is a general 'play/open X' rather than a specific song/video title.",
-        "parameters": {"type": "object", "properties": {"request": {"type": "string", "description": "the user's raw request, e.g. 'news', 'some bhajans', 'workout music'"}}, "required": ["request"]}}},  
+        "parameters": {"type": "object", "properties": {"request": {"type": "string", "description": "the user's raw request, e.g. 'news', 'some bhajans', 'workout music'"}}, "required": ["request"]}}},
+    {"type": "function", "function": {"name": "ocr_screen_layout", "description": "Return OCR text with approximate screen coordinates for visible UI labels/buttons.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "click_ui_target", "description": "Click a visible UI target by label and verify whether the click changed active window state.",
+        "parameters": {"type": "object", "properties": {"target": {"type": "string"}}, "required": ["target"]}}},
+    {"type": "function", "function": {"name": "context_snapshot", "description": "Get active window, clipboard, recent actions and current visual/task notes for reference resolution.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "system_diagnostics", "description": "Detailed CPU, RAM, storage, network and battery diagnostics.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "draft_whatsapp_reply", "description": "Prepare a safe WhatsApp reply draft for user review; never sends autonomously.",
+        "parameters": {"type": "object", "properties": {"message": {"type": "string"}, "tone": {"type": "string"}}, "required": ["message"]}}},
+    {"type": "function", "function": {"name": "translate_screen_overlay", "description": "OCR visible screen text, translate it, and show a lightweight HUD overlay.",
+        "parameters": {"type": "object", "properties": {"target_language": {"type": "string"}}}}},
+
 ]
 
-# Tools whose result is simple/short enough that Nova can just speak a plain
+# Tools whose result is simple/short enough that Jarvis can just speak a plain
 # confirmation directly, skipping the second GPT round-trip entirely (saves
 # tokens on the common case - opening an app doesn't need an AI-written summary).
 SIMPLE_ACTION_TOOLS = {
@@ -1575,8 +1736,8 @@ SIMPLE_ACTION_TOOLS = {
     "join_meeting", "system_status", "type_text", "open_paint",
     "draw_circle_paint", "draw_rectangle_paint", "draw_line_paint", "draw_scenery_paint", "control_brightness" ,
     "get_weather", "fill_area", "draw_freehand", "add_text_paint",
-    "paint_undo", "paint_redo", "clear_canvas", "save_paint_drawing", "open_app_on_phone", "phone_volume", "take_phone_screenshot", "play_youtube_on_phone"
-    "play_content_on_phone" ,
+    "paint_undo", "paint_redo", "clear_canvas", "save_paint_drawing", "open_app_on_phone", "phone_volume", "take_phone_screenshot", "play_youtube_on_phone",
+    "play_content_on_phone", "click_ui_target", "system_diagnostics", "translate_screen_overlay" ,
 }
 
 TOOL_FUNCTIONS = {
@@ -1623,10 +1784,20 @@ TOOL_FUNCTIONS = {
     "take_phone_screenshot": lambda a: take_phone_screenshot(),
     "play_youtube_on_phone": lambda a: play_youtube_on_phone(a.get("query", "")),
     "play_content_on_phone": lambda a: play_content_on_phone(a.get("request", "")),
+    "ocr_screen_layout": lambda a: ocr_screen_layout(),
+    "click_ui_target": lambda a: click_ui_target(a.get("target", "")),
+    "context_snapshot": lambda a: context_snapshot(),
+    "system_diagnostics": lambda a: system_diagnostics(),
+    "draft_whatsapp_reply": lambda a: draft_whatsapp_reply(a.get("message", ""), a.get("tone", "friendly")),
+    "translate_screen_overlay": lambda a: translate_screen_overlay(a.get("target_language", "Hindi")),
 }
 
 
 def execute_tool(name: str, args: dict) -> str:
+    if name in SENSITIVE_TOOL_NAMES and not args.get("confirmed"):
+        return "I need explicit confirmation before doing that sensitive action."
+    if any(is_sensitive_text(str(v)) for v in (args or {}).values()) and name in {"remember_fact", "type_text", "type_on_phone"}:
+        return "I will not store or type secrets such as passwords, OTPs, tokens, or card details."
     fn = TOOL_FUNCTIONS.get(name)
     if not fn:
         return f"Unknown tool: {name}"
@@ -1649,9 +1820,9 @@ def _update_history(user_text: str, reply: str):
     save_memory()
 
 def _call_openai(messages, tools=None, max_tokens=800):
-    """One OpenAI call with automatic retry at a higher token budget if the
-    model got cut off mid-response (gpt-5-mini's reasoning can eat into the
-    budget before it even gets to the visible answer)."""
+    """One OpenAI call with automatic retry at a higher token budget if needed."""
+    if not requests:
+        return None, "The requests package is needed for OpenAI calls."
     headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
     payload = {
         "model": OPENAI_MODEL,
@@ -1663,15 +1834,16 @@ def _call_openai(messages, tools=None, max_tokens=800):
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
 
-    resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=30)
-    data = resp.json()
+    def _post():
+        return requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=30)
 
+    resp = _post()
+    data = resp.json()
     if resp.status_code != 200:
         err = data.get("error", {}).get("message", resp.text)
-        # Truncated-output errors are recoverable - just retry once with more room.
         if "max_tokens" in err.lower() or "output limit" in err.lower():
             payload["max_completion_tokens"] = max_tokens * 2
-            resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=30)
+            resp = _post()
             data = resp.json()
             if resp.status_code != 200:
                 return None, data.get("error", {}).get("message", resp.text)
@@ -1680,24 +1852,21 @@ def _call_openai(messages, tools=None, max_tokens=800):
 
     choice = data["choices"][0]
     if choice.get("finish_reason") == "length" and not choice["message"].get("tool_calls"):
-        # Ran out of room without actually finishing - retry with double budget.
         payload["max_completion_tokens"] = max_tokens * 2
-        resp = requests.post(OPENAI_API_URL, headers=headers, json=payload, timeout=30)
+        resp = _post()
         data = resp.json()
         if resp.status_code != 200:
             return None, data.get("error", {}).get("message", resp.text)
-
     return data, None
 
-
 def think_and_act(user_text: str) -> str:
-    """Nova's brain: send the user's natural-language input (plus recent
+    """Jarvis's brain: send the user's natural-language input (plus recent
     conversation history) to GPT-5-mini with tool definitions. The model
     decides whether to call tool(s), and Python executes whatever it picks."""
     if not OPENAI_API_KEY:
         return "I need an OpenAI API key set (OPENAI_API_KEY) before I can think."
 
-    messages = [{"role": "system", "content": NOVA_SYSTEM_PROMPT}] + CONVO_HISTORY + [
+    messages = [{"role": "system", "content": NOVA_SYSTEM_PROMPT}, {"role": "system", "content": "CONTEXT: " + context_snapshot()}] + CONVO_HISTORY + [
         {"role": "user", "content": user_text}
     ]
 
@@ -1725,6 +1894,7 @@ def think_and_act(user_text: str) -> str:
             except Exception:
                 args = {}
             result = execute_tool(fn_name, args)
+            remember_session_note("recent_actions", f"{fn_name}({args}) -> {result}")
             results.append((fn_name, result))
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
 
@@ -1758,11 +1928,20 @@ def think_and_act(user_text: str) -> str:
 # ---------------------------------------------------------------------------
 # MAIN LOOP
 # ---------------------------------------------------------------------------
-WAKE_PHRASES = ["wake up nova", "nova wake up", "wake up", "nova utho"]
+WAKE_WORDS = ["jarvis", "जार्विस", "jervis", "jarves"]
+WAKE_PHRASES = ["wake up jarvis", "jarvis wake up", "wake up", "jarvis utho", "जार्विस उठो"]
 SILENT_ROUNDS_BEFORE_SLEEP = 4
+ACTIVE_CONVERSATION_SECONDS = 45
+
+def extract_wake_command(text: str):
+    lowered = (text or "").lower().strip()
+    for word in WAKE_WORDS:
+        if lowered == word or lowered.startswith(word + " ") or (word in lowered and any(p in lowered for p in WAKE_PHRASES)):
+            return lowered.replace(word, "", 1).strip(" ,:-")
+    return None
 
 # ---------------------------------------------------------------------------
-# PROACTIVE BEHAVIOR (Nova speaks up without being asked)
+# PROACTIVE BEHAVIOR (Jarvis speaks up without being asked)
 # ---------------------------------------------------------------------------
 def _already_said_today(key: str) -> bool:
     return _proactive_said_today.get(key) == datetime.date.today().isoformat()
@@ -1800,9 +1979,10 @@ def proactive_watcher():
 def main():
     global DICTATION_MODE
     briefing = morning_briefing()
-    speak(f"Hi boss! {briefing} Nova's online - just talk to me normally.")
+    speak(f"Hi boss! {briefing} Jarvis online - just talk to me normally.")
 
-    asleep = False
+    asleep = True
+    last_active_at = 0
     silent_rounds = 0
     threading.Thread(target=proactive_watcher, daemon=True).start()
     while True:
@@ -1810,21 +1990,32 @@ def main():
 
         if not text:
             silent_rounds += 1
-            if not asleep and silent_rounds >= SILENT_ROUNDS_BEFORE_SLEEP:
+            if not asleep and (silent_rounds >= SILENT_ROUNDS_BEFORE_SLEEP or time.time() - last_active_at > ACTIVE_CONVERSATION_SECONDS):
                 asleep = True
-                speak("Going to sleep. Say 'wake up nova' when you need me.")
+                set_status("sleeping", "say Jarvis")
+                speak("Going quiet. Say Jarvis when you need me.")
             continue
 
         silent_rounds = 0
 
+        wake_command = extract_wake_command(text)
         if asleep:
-            if any(w in text for w in WAKE_PHRASES):
+            if wake_command is not None:
                 asleep = False
-                speak("Yeah, I'm listening!")
-            continue
+                last_active_at = time.time()
+                set_status("listening")
+                if wake_command:
+                    text = wake_command
+                else:
+                    speak("At your service.")
+                    continue
+            else:
+                continue
+        else:
+            last_active_at = time.time()
 
         # Instant, zero-API-cost meta controls
-        if text.strip() in ("stop", "exit", "quit", "goodbye nova"):
+        if text.strip() in ("stop", "exit", "quit", "goodbye jarvis"):
             speak("Okay, bye!")
             save_memory()
             sys.exit(0)
@@ -1848,8 +2039,10 @@ def main():
             type_text(text + " ")  # trailing space so sentences don't run together
             continue
 
-        # Everything else goes through Nova's brain
+        # Everything else goes through Jarvis's brain
+        set_status("thinking")
         reply = think_and_act(text)
+        set_status("success" if not reply.lower().startswith(("sorry", "i hit", "that action failed")) else "failure")
         speak(reply)
 
 
