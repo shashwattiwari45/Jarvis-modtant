@@ -86,11 +86,35 @@ def memory_snapshot(limit: int = 30):
     return {k: v for k, v in rows}
 
 
+def save_memory_updates(updates):
+    saved = []
+    if not isinstance(updates, list):
+        return saved
+    with db() as conn:
+        for item in updates[:5]:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key", "")).strip()[:200]
+            value = str(item.get("value", "")).strip()[:4000]
+            if not key or not value:
+                continue
+            lowered = f"{key} {value}".lower()
+            if any(term in lowered for term in ("password", "passcode", "otp", "api key", "secret", "credit card", "bank account")):
+                continue
+            now = int(time.time())
+            conn.execute(
+                "INSERT INTO memory(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+                (key, value, now),
+            )
+            saved.append(key)
+    return saved
+
+
 def cloud_brain(message: str, memories: dict) -> dict:
     system = (
         "You are Jarvis Cloud, the shared personal AI brain for the user's phone and PC. "
-        "Return ONLY valid JSON with keys mode and reply. mode must be exactly 'chat' or 'pc_action'. "
-        "Use 'pc_action' when the user is asking to open/control/debug/read/change something on the Windows PC, "
+        "Return ONLY valid JSON with keys mode, reply, and memory_updates. mode must be exactly 'chat' or 'pc_action'. "
+        "Use 'pc_action' when the user asks to open/control/debug/read/change something on the Windows PC, "
         "or any task that needs local files, applications, mouse, keyboard, OCR, screen vision, or other PC-only tools. "
         "Use 'chat' for normal conversation, planning, memory discussion, social-media discussion, weather discussion, "
         "translation questions, or anything that can be answered without direct PC access. "
@@ -98,7 +122,11 @@ def cloud_brain(message: str, memories: dict) -> dict:
         "sir or boss naturally when appropriate. Avoid excessive politeness, ceremonial wording, repeated apologies, and "
         "long customer-service style responses. Do not claim to be human. "
         "For pc_action, reply should briefly acknowledge and say the PC agent will execute it. "
-        "For chat, answer naturally and concisely. Never claim a PC action was completed from the cloud alone."
+        "For chat, answer naturally, directly, confidently and concisely with a subtle Jarvis-style wit; do not sound like customer support. "
+        "memory_updates must be an array. Add entries ONLY for stable personal details/preferences/facts the user explicitly asks you to remember, "
+        "or clear stable profile statements such as a preferred voice or how they want Jarvis to address them. "
+        "Do not store secrets, passwords, OTPs, API keys, financial credentials, transient requests, or ordinary conversation. "
+        "Each entry must be {\"key\": \"short_key\", \"value\": \"remembered_fact\"}. Use at most 5 entries."
     )
     prompt = f"LONG-TERM MEMORY:\n{json.dumps(memories, ensure_ascii=False)}\n\nUSER:\n{message}"
     response = client.responses.create(model=MODEL, instructions=system, input=prompt)
@@ -107,9 +135,12 @@ def cloud_brain(message: str, memories: dict) -> dict:
         parsed = json.loads(raw)
         if parsed.get("mode") not in {"chat", "pc_action"}:
             raise ValueError("invalid mode")
-        return {"mode": parsed["mode"], "reply": str(parsed.get("reply", ""))}
+        updates = parsed.get("memory_updates", [])
+        if not isinstance(updates, list):
+            updates = []
+        return {"mode": parsed["mode"], "reply": str(parsed.get("reply", "")), "memory_updates": updates[:5]}
     except Exception:
-        return {"mode": "chat", "reply": raw or "I'm here, boss."}
+        return {"mode": "chat", "reply": raw or "I'm here, boss.", "memory_updates": []}
 
 
 @app.get("/")
@@ -142,7 +173,15 @@ def ask(payload: AskRequest, authorization: Optional[str] = Header(default=None)
         raise HTTPException(status_code=400, detail="X-Device-ID header is required")
     sid = get_or_create_session(payload.session_id, x_device_id)
     result = cloud_brain(payload.message, memory_snapshot())
-    return {"ok": True, "session_id": sid, "mode": result["mode"], "reply": result["reply"], "device_id": x_device_id}
+    saved_keys = save_memory_updates(result.get("memory_updates", []))
+    return {
+        "ok": True,
+        "session_id": sid,
+        "mode": result["mode"],
+        "reply": result["reply"],
+        "device_id": x_device_id,
+        "memory_saved": saved_keys,
+    }
 
 
 @app.get("/memory")
@@ -154,9 +193,7 @@ def get_memory(authorization: Optional[str] = Header(default=None)):
 @app.post("/memory")
 def set_memory(payload: MemoryRequest, authorization: Optional[str] = Header(default=None)):
     authenticate(authorization.replace("Bearer ", "", 1) if authorization else None)
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO memory(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-            (payload.key, payload.value, int(time.time())),
-        )
+    saved = save_memory_updates([{"key": payload.key, "value": payload.value}])
+    if not saved:
+        raise HTTPException(status_code=400, detail="Memory value rejected")
     return {"ok": True, "key": payload.key}
