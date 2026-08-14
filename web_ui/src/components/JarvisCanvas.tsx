@@ -4,7 +4,7 @@ import { JarvisState } from '../types';
 interface JarvisCanvasProps {
   state: JarvisState;
   automationMode: boolean;
-  audioLevel: number; // 0.0 to 1.0
+  audioLevel: number;
   onCanvasClick?: () => void;
 }
 
@@ -15,335 +15,146 @@ export const JarvisCanvas: React.FC<JarvisCanvasProps> = ({
   onCanvasClick,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stateRef = useRef(state);
+  const automationRef = useRef(automationMode);
+  const audioRef = useRef(audioLevel);
 
-  // Smooth uniform interpolation targets
-  const targetSpeedRef = useRef<number>(1.2);
-  const currentSpeedRef = useRef<number>(1.2);
-
-  const targetAudioRef = useRef<number>(0);
-  const currentAudioRef = useRef<number>(0);
-
-  const targetColorRef = useRef<[number, number, number]>([0.0, 0.898, 1.0]);
-  const currentColorRef = useRef<[number, number, number]>([0.0, 0.898, 1.0]);
-
-  // Update target values based on state and automationMode
-  useEffect(() => {
-    // Determine Target Color
-    if (automationMode) {
-      // RED mode when automation is activated
-      targetColorRef.current = [1.0, 0.15, 0.15];
-    } else if (state === 'thinking') {
-      // Purple / Violet core during deep thinking
-      targetColorRef.current = [0.72, 0.35, 1.0];
-    } else {
-      // Classic JARVIS Cyan
-      targetColorRef.current = [0.0, 0.898, 1.0];
-    }
-
-    // Determine Target Rotation Speed
-    // - thinking: rotate fast
-    // - listening: rotate slow
-    // - speaking: rotate dynamically with voice
-    // - idle: normal speed
-    if (state === 'thinking') {
-      targetSpeedRef.current = automationMode ? 6.0 : 4.8;
-    } else if (state === 'listening') {
-      targetSpeedRef.current = 0.5;
-    } else if (state === 'speaking') {
-      targetSpeedRef.current = 2.4 + audioLevel * 1.5;
-    } else {
-      // idle
-      targetSpeedRef.current = automationMode ? 1.8 : 1.2;
-    }
-  }, [state, automationMode, audioLevel]);
-
-  useEffect(() => {
-    targetAudioRef.current = audioLevel;
-  }, [audioLevel]);
+  useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => { automationRef.current = automationMode; }, [automationMode]);
+  useEffect(() => { audioRef.current = audioLevel; }, [audioLevel]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
 
-    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-    if (!gl) return;
+    let animationId = 0;
+    let frame = 0;
+    let width = 1;
+    let height = 1;
+    let dpr = 1;
 
-    let animationFrameId: number;
-
-    const syncSize = () => {
-      if (!canvas) return;
-      const w = canvas.clientWidth || window.innerWidth;
-      const h = canvas.clientHeight || window.innerHeight;
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-    };
-
-    let resizeObserver: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(syncSize);
-      resizeObserver.observe(canvas);
-    }
-    syncSize();
-
-    // Vertex Shader
-    const vs = `
-      attribute vec2 a_position;
-      varying vec2 v_texCoord;
-      void main() {
-        v_texCoord = a_position * 0.5 + 0.5;
-        gl_Position = vec4(a_position, 0.0, 1.0);
-      }
-    `;
-
-    // Fragment Shader
-    const fs = `
-      precision highp float;
-      varying vec2 v_texCoord;
-      uniform float u_time;
-      uniform vec2 u_resolution;
-      uniform vec2 u_mouse;
-      uniform float u_speed;
-      uniform vec3 u_color;
-      uniform float u_automation;
-      uniform float u_audio_level;
-      uniform float u_state; // 0=idle, 1=listening, 2=thinking, 3=speaking
-
-      // Simplex 2D noise
-      vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
-      float snoise(vec2 v){
-        const vec4 C = vec4(0.211324865405187, 0.366025403784439,
-                 -0.577350269189626, 0.024390243902439);
-        vec2 i  = floor(v + dot(v, C.yy) );
-        vec2 x0 = v -   i + dot(i, C.xx);
-        vec2 i1;
-        i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-        vec4 x12 = x0.xyxy + C.xxzz;
-        x12.xy -= i1;
-        i = mod(i, 289.0);
-        vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 ))
-        + i.x + vec3(0.0, i1.x, 1.0 ));
-        vec3 m = max(0.5 - vec4(dot(x0,x0), dot(x12.xy,x12.xy),
-          dot(x12.zw,x12.zw), 0.0), 0.0);
-        m = m*m ;
-        m = m*m ;
-        vec3 x = 2.0 * fract(p * C.www) - 1.0;
-        vec3 h = abs(x) - 0.5;
-        vec3 ox = floor(x + 0.5);
-        vec3 a0 = x - ox;
-        m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
-        vec3 g;
-        g.x  = a0.x  * x0.x  + h.x  * x0.y;
-        g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-        return 130.0 * dot(m, g);
-      }
-
-      void main() {
-        vec2 uv = v_texCoord;
-        vec2 centered_uv = (uv - 0.5) * 2.0;
-        centered_uv.x *= u_resolution.x / u_resolution.y;
-
-        float dist = length(centered_uv);
-        float angle = atan(centered_uv.y, centered_uv.x);
-
-        // Core Base Color from uniform
-        vec3 color = u_color;
-
-        // Dynamic Ring Radii modulation based on state & audio
-        float audio_expand = u_audio_level * 0.05;
-        float pulse = sin(u_time * (u_speed * 1.5)) * 0.015;
-
-        float r1 = 0.45 + pulse + audio_expand;
-        float r2 = 0.47 + pulse * 0.5;
-        float r3 = 0.49 - pulse * 0.5;
-
-        // Concentric Rings
-        float ring1 = smoothstep(0.008, 0.0, abs(dist - r1));
-        float ring2 = smoothstep(0.005, 0.0, abs(dist - r2));
-        float ring3 = smoothstep(0.003, 0.0, abs(dist - r3));
-
-        // Rotating ring segments
-        // In thinking state (u_state == 2.0) or high speed, segments spin rapidly with opposite direction inner ring
-        float rot_dir1 = u_time * u_speed;
-        float rot_dir2 = -u_time * u_speed * 0.7;
-
-        float segments1 = step(0.4, sin(angle * 12.0 + rot_dir1));
-        float segments2 = step(0.6, cos(angle * 8.0 + rot_dir2));
-
-        float rotating_ring1 = smoothstep(0.012, 0.0, abs(dist - (r1 + 0.06))) * segments1;
-        float rotating_ring2 = smoothstep(0.008, 0.0, abs(dist - (r1 - 0.04))) * segments2;
-
-        // Outer tech tick marks (radar notches)
-        float ticks = step(0.92, sin(angle * 36.0 + rot_dir1 * 0.2)) * smoothstep(0.004, 0.0, abs(dist - (r1 + 0.09)));
-
-        // Central Waveform Line
-        // Wave amplitude scales up when listening or speaking
-        float wave_amp = 0.08 + u_audio_level * 0.25;
-        if (u_state == 2.0) { // thinking
-          wave_amp = 0.15 + sin(u_time * 15.0) * 0.05;
-        }
-
-        float wave_freq = 12.0;
-        float wave_y = snoise(vec2(centered_uv.x * wave_freq - u_time * (u_speed * 2.0), u_time * 0.5)) * wave_amp;
-        
-        // Mask wave line inside center horizontal axis
-        float wave_mask = step(abs(centered_uv.x), 0.75);
-        float wave_line = smoothstep(0.012, 0.0, abs(centered_uv.y - wave_y)) * wave_mask;
-
-        // Secondary harmonic wave line
-        float wave_y2 = snoise(vec2(centered_uv.x * 20.0 + u_time * (u_speed * 3.0), u_time)) * (wave_amp * 0.6);
-        float wave_line2 = smoothstep(0.006, 0.0, abs(centered_uv.y - wave_y2)) * wave_mask * 0.6;
-
-        // Combine HUD ring layers
-        float final_alpha = ring1 * 0.7 + ring2 * 0.5 + ring3 * 0.4 + rotating_ring1 * 0.85 + rotating_ring2 * 0.75 + ticks * 0.9 + wave_line + wave_line2;
-
-        // Luminous Bloom Glow
-        float glow_dist = abs(dist - r1);
-        vec3 glow = color * (0.025 / max(0.001, glow_dist));
-
-        // Additional center radial core glow
-        float center_core = smoothstep(0.2, 0.0, dist) * (0.2 + u_audio_level * 0.3);
-
-        vec3 final_color = color * final_alpha + glow * 0.6 + color * center_core;
-
-        // Automation Warning Glitch Effect (Red Overdrive)
-        if (u_automation > 0.5) {
-          float glitch_scan = step(0.97, sin(uv.y * 120.0 + u_time * 10.0));
-          final_color += vec3(0.5, 0.0, 0.0) * glitch_scan;
-        }
-
-        // Atmosphere background (tech grid + noise)
-        float bg_noise = snoise(uv * 12.0 + u_time * 0.05) * 0.03;
-        vec3 bg_color = (u_automation > 0.5) ? vec3(0.05, 0.005, 0.01) : vec3(0.008, 0.015, 0.025);
-        bg_color += bg_noise;
-
-        gl_FragColor = vec4(mix(bg_color, final_color, final_alpha + length(glow) * 0.25), 0.95);
-      }
-    `;
-
-    const compileShader = (type: number, source: string) => {
-      const shader = gl.createShader(type);
-      if (!shader) return null;
-      gl.shaderSource(shader, source);
-      gl.compileShader(shader);
-      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        console.error('Shader compilation error:', gl.getShaderInfoLog(shader));
-        gl.deleteShader(shader);
-        return null;
-      }
-      return shader;
-    };
-
-    const vertShader = compileShader(gl.VERTEX_SHADER, vs);
-    const fragShader = compileShader(gl.FRAGMENT_SHADER, fs);
-    if (!vertShader || !fragShader) return;
-
-    const prog = gl.createProgram();
-    if (!prog) return;
-    gl.attachShader(prog, vertShader);
-    gl.attachShader(prog, fragShader);
-    gl.linkProgram(prog);
-
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      console.error('Program link error:', gl.getProgramInfoLog(prog));
-      return;
-    }
-
-    gl.useProgram(prog);
-
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-    gl.bufferData(
-      gl.ARRAY_BUFFER,
-      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
-      gl.STATIC_DRAW
-    );
-
-    const posAttr = gl.getAttribLocation(prog, 'a_position');
-    gl.enableVertexAttribArray(posAttr);
-    gl.vertexAttribPointer(posAttr, 2, gl.FLOAT, false, 0, 0);
-
-    const uTime = gl.getUniformLocation(prog, 'u_time');
-    const uRes = gl.getUniformLocation(prog, 'u_resolution');
-    const uMouse = gl.getUniformLocation(prog, 'u_mouse');
-    const uSpeed = gl.getUniformLocation(prog, 'u_speed');
-    const uColor = gl.getUniformLocation(prog, 'u_color');
-    const uAutomation = gl.getUniformLocation(prog, 'u_automation');
-    const uAudioLevel = gl.getUniformLocation(prog, 'u_audio_level');
-    const uState = gl.getUniformLocation(prog, 'u_state');
-
-    let mousePos = { x: canvas.width / 2, y: canvas.height / 2 };
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!canvas) return;
+    const resize = () => {
       const rect = canvas.getBoundingClientRect();
-      if (rect.width && rect.height) {
-        const nx = (e.clientX - rect.left) / rect.width;
-        const ny = 1.0 - (e.clientY - rect.top) / rect.height;
-        mousePos.x = nx * canvas.width;
-        mousePos.y = ny * canvas.height;
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      width = Math.max(1, Math.floor(rect.width));
+      height = Math.max(1, Math.floor(rect.height));
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
+    resize();
+    observer?.observe(canvas);
+    window.addEventListener('resize', resize);
+
+    const ring = (cx: number, cy: number, radius: number, widthPx: number, alpha: number, start: number, end: number, color: string) => {
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = widthPx;
+      ctx.shadowBlur = 18;
+      ctx.shadowColor = color;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, start, end);
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    const draw = () => {
+      frame += 0.016;
+      const currentState = stateRef.current;
+      const automation = automationRef.current;
+      const level = Math.max(0, Math.min(1, audioRef.current));
+
+      ctx.clearRect(0, 0, width, height);
+
+      const bg = ctx.createRadialGradient(width * 0.5, height * 0.52, 20, width * 0.5, height * 0.52, Math.max(width, height) * 0.75);
+      bg.addColorStop(0, automation ? 'rgba(40,4,8,0.32)' : 'rgba(2,16,25,0.30)');
+      bg.addColorStop(1, 'rgba(0,0,0,0.03)');
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, width, height);
+
+      const cx = width * 0.5;
+      const cy = height * 0.52;
+      const radius = Math.min(width, height) * 0.205;
+      const color = automation ? '#ff3030' : currentState === 'thinking' ? '#b46cff' : '#00dcff';
+      const speed = currentState === 'thinking' ? 2.5 : currentState === 'listening' ? 0.75 : currentState === 'speaking' ? 1.25 + level * 1.7 : automation ? 0.95 : 0.65;
+      const pulse = Math.sin(frame * speed * 3.2) * 2.8 + level * 8;
+      const rotation = frame * speed;
+
+      ring(cx, cy, radius + pulse, 2.2, 0.86, 0, Math.PI * 2, color);
+      ring(cx, cy, radius + 11 + pulse * 0.45, 1.05, 0.58, rotation * 0.35, rotation * 0.35 + Math.PI * 1.72, color);
+      ring(cx, cy, radius + 21, 0.8, 0.42, -rotation * 0.55, -rotation * 0.55 + Math.PI * 1.25, color);
+
+      for (let i = 0; i < 4; i++) {
+        const start = rotation * (i % 2 ? -0.7 : 0.45) + i * (Math.PI / 2);
+        ring(cx, cy, radius + 31 + (i % 2) * 5, 1.2, 0.55, start, start + Math.PI * 0.22, color);
       }
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.32;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 36; i++) {
+        const a = (Math.PI * 2 * i) / 36 + rotation * 0.08;
+        const r1 = radius + 42;
+        const r2 = r1 + (i % 3 === 0 ? 7 : 3);
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * r1, Math.sin(a) * r1);
+        ctx.lineTo(Math.cos(a) * r2, Math.sin(a) * r2);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      const coreRadius = 20 + level * 12 + Math.sin(frame * 4) * 1.5;
+      const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreRadius * 2.8);
+      core.addColorStop(0, automation ? 'rgba(255,70,70,0.98)' : 'rgba(200,250,255,0.98)');
+      core.addColorStop(0.18, automation ? 'rgba(255,50,50,0.70)' : 'rgba(0,220,255,0.75)');
+      core.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = core;
+      ctx.beginPath();
+      ctx.arc(cx, cy, coreRadius * 2.8, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = currentState === 'listening' || currentState === 'speaking' ? 1.8 : 1.1;
+      ctx.globalAlpha = 0.92;
+      ctx.shadowBlur = 12;
+      ctx.shadowColor = color;
+      ctx.beginPath();
+      const waveWidth = Math.min(width * 0.32, 360);
+      const samples = 120;
+      for (let i = 0; i <= samples; i++) {
+        const x = -waveWidth / 2 + (waveWidth * i) / samples;
+        const nx = i / samples;
+        const envelope = Math.pow(Math.sin(Math.PI * nx), 0.72);
+        const boost = currentState === 'thinking' ? 1.35 : currentState === 'speaking' ? 1.55 : 1;
+        const amp = (5 + level * 20) * envelope * boost;
+        const y = Math.sin(nx * 28 + frame * speed * 5.5) * amp + Math.sin(nx * 63 - frame * speed * 8) * amp * 0.25;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      animationId = requestAnimationFrame(draw);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-
-    let startTime = performance.now();
-
-    const render = () => {
-      const now = performance.now();
-      const elapsedSeconds = (now - startTime) * 0.001;
-
-      // Smoothly interpolate current uniforms towards targets
-      currentSpeedRef.current += (targetSpeedRef.current - currentSpeedRef.current) * 0.08;
-      currentAudioRef.current += (targetAudioRef.current - currentAudioRef.current) * 0.12;
-
-      currentColorRef.current = [
-        currentColorRef.current[0] + (targetColorRef.current[0] - currentColorRef.current[0]) * 0.08,
-        currentColorRef.current[1] + (targetColorRef.current[1] - currentColorRef.current[1]) * 0.08,
-        currentColorRef.current[2] + (targetColorRef.current[2] - currentColorRef.current[2]) * 0.08,
-      ];
-
-      syncSize();
-      gl.viewport(0, 0, canvas.width, canvas.height);
-
-      if (uTime) gl.uniform1f(uTime, elapsedSeconds);
-      if (uRes) gl.uniform2f(uRes, canvas.width, canvas.height);
-      if (uMouse) gl.uniform2f(uMouse, mousePos.x, mousePos.y);
-      if (uSpeed) gl.uniform1f(uSpeed, currentSpeedRef.current);
-      if (uColor) gl.uniform3f(uColor, currentColorRef.current[0], currentColorRef.current[1], currentColorRef.current[2]);
-      if (uAutomation) gl.uniform1f(uAutomation, automationMode ? 1.0 : 0.0);
-      if (uAudioLevel) gl.uniform1f(uAudioLevel, currentAudioRef.current);
-
-      let stateVal = 0.0;
-      if (state === 'listening') stateVal = 1.0;
-      else if (state === 'thinking') stateVal = 2.0;
-      else if (state === 'speaking') stateVal = 3.0;
-
-      if (uState) gl.uniform1f(uState, stateVal);
-
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      animationFrameId = requestAnimationFrame(render);
-    };
-
-    render();
-
+    draw();
     return () => {
-      cancelAnimationFrame(animationFrameId);
-      window.removeEventListener('mousemove', handleMouseMove);
-      if (resizeObserver) resizeObserver.disconnect();
+      cancelAnimationFrame(animationId);
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
     };
-  }, [automationMode, state]);
+  }, []);
 
   return (
-    <div
-      className="fixed inset-0 w-full h-full cursor-pointer z-0 overflow-hidden"
-      onClick={onCanvasClick}
-    >
-      <canvas
-        ref={canvasRef}
-        className="block w-full h-full pointer-events-auto"
-      />
+    <div className="fixed inset-0 w-full h-full cursor-pointer z-0 overflow-hidden pointer-events-none" onClick={onCanvasClick}>
+      <canvas ref={canvasRef} className="block w-full h-full pointer-events-auto" aria-label="JARVIS animated core" />
     </div>
   );
 };
