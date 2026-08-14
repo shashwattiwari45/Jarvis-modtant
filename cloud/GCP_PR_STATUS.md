@@ -1,1 +1,0 @@
-Google Cloud Run deployment work for this branch is documented in `GCP_CLOUD_RUN.md` and `DEPLOYMENT_CHECKLIST.md`. The runtime image, scheduled Instagram worker, environment template, and Docker ignore rules are included in this PR.
