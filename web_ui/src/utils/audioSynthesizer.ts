@@ -1,84 +1,85 @@
-// Audio Synthesizer and Web Speech API helper for JARVIS
+// JARVIS audio system: HUD tones, microphone analysis and a male-first browser voice.
 
 class JarvisAudioSystem {
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private micStream: MediaStream | null = null;
   private micSource: MediaStreamAudioSourceNode | null = null;
-  private isMuted: boolean = false;
+  private isMuted = false;
+  private voices: SpeechSynthesisVoice[] = [];
+  private voicesReady = false;
+
+  constructor() {
+    if ('speechSynthesis' in window) {
+      this.refreshVoices();
+      window.speechSynthesis.addEventListener('voiceschanged', () => this.refreshVoices());
+    }
+  }
+
+  private refreshVoices() {
+    if (!('speechSynthesis' in window)) return;
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length) {
+      this.voices = voices;
+      this.voicesReady = true;
+    }
+  }
 
   private initCtx() {
     if (!this.audioCtx) {
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
-      if (AudioCtxClass) {
-        this.audioCtx = new AudioCtxClass();
-      }
+      if (AudioCtxClass) this.audioCtx = new AudioCtxClass();
     }
-    if (this.audioCtx && this.audioCtx.state === 'suspended') {
-      this.audioCtx.resume();
-    }
+    if (this.audioCtx?.state === 'suspended') this.audioCtx.resume().catch(() => {});
   }
 
-  // Play high-tech HUD beep sound
   public playBeep(freq = 880, type: OscillatorType = 'sine', duration = 0.08) {
     if (this.isMuted) return;
     try {
       this.initCtx();
       if (!this.audioCtx) return;
-
+      const now = this.audioCtx.currentTime;
       const osc = this.audioCtx.createOscillator();
       const gain = this.audioCtx.createGain();
-
       osc.type = type;
-      osc.frequency.setValueAtTime(freq, this.audioCtx.currentTime);
-
-      gain.gain.setValueAtTime(0.08, this.audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, this.audioCtx.currentTime + duration);
-
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
       osc.connect(gain);
       gain.connect(this.audioCtx.destination);
-
-      osc.start();
-      osc.stop(this.audioCtx.currentTime + duration);
-    } catch (e) {
-      // Audio context play error handled
-    }
+      osc.start(now);
+      osc.stop(now + duration);
+    } catch {}
   }
 
-  // Play state transition sound (e.g. Thinking / Automation Red mode alert)
   public playStateSound(state: 'listening' | 'thinking' | 'speaking' | 'automation_on' | 'automation_off') {
     if (this.isMuted) return;
     try {
       this.initCtx();
       if (!this.audioCtx) return;
-
       const now = this.audioCtx.currentTime;
       const osc = this.audioCtx.createOscillator();
       const gain = this.audioCtx.createGain();
 
       if (state === 'automation_on') {
-        // High alert descending-ascending alarm chime
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(220, now);
         osc.frequency.exponentialRampToValueAtTime(880, now + 0.2);
         gain.gain.setValueAtTime(0.12, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
       } else if (state === 'thinking') {
-        // High freq pulsing chime
         osc.type = 'sine';
         osc.frequency.setValueAtTime(1200, now);
         osc.frequency.exponentialRampToValueAtTime(1600, now + 0.15);
         gain.gain.setValueAtTime(0.06, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
       } else if (state === 'listening') {
-        // Low warm tone
         osc.type = 'triangle';
         osc.frequency.setValueAtTime(440, now);
         osc.frequency.linearRampToValueAtTime(554, now + 0.12);
         gain.gain.setValueAtTime(0.08, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
       } else {
-        // Speaking start
         osc.type = 'sine';
         osc.frequency.setValueAtTime(660, now);
         osc.frequency.linearRampToValueAtTime(880, now + 0.1);
@@ -88,14 +89,11 @@ class JarvisAudioSystem {
 
       osc.connect(gain);
       gain.connect(this.audioCtx.destination);
-      osc.start();
+      osc.start(now);
       osc.stop(now + 0.3);
-    } catch (e) {
-      // Audio error handled
-    }
+    } catch {}
   }
 
-  // Toggle Mute
   public setMute(muted: boolean) {
     this.isMuted = muted;
   }
@@ -104,126 +102,132 @@ class JarvisAudioSystem {
     return this.isMuted;
   }
 
-  // Start Mic Analyzer for real-time sound levels
   public async startMicAnalyzer(onAudioLevel: (level: number) => void): Promise<() => void> {
     try {
       this.initCtx();
       if (!this.audioCtx) return () => {};
-
       this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       this.analyser = this.audioCtx.createAnalyser();
       this.analyser.fftSize = 64;
-
       this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
       this.micSource.connect(this.analyser);
 
       const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-      let animId: number;
-
+      let animId = 0;
       const update = () => {
         if (this.analyser) {
           this.analyser.getByteFrequencyData(dataArray);
           let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i];
-          }
-          const avg = sum / dataArray.length;
-          const normalized = Math.min(1.0, avg / 128);
-          onAudioLevel(normalized);
+          for (const value of dataArray) sum += value;
+          onAudioLevel(Math.min(1, (sum / dataArray.length) / 128));
         }
         animId = requestAnimationFrame(update);
       };
-
       update();
 
       return () => {
         cancelAnimationFrame(animId);
-        if (this.micStream) {
-          this.micStream.getTracks().forEach((track) => track.stop());
-          this.micStream = null;
-        }
-        if (this.micSource) {
-          this.micSource.disconnect();
-          this.micSource = null;
-        }
+        this.micStream?.getTracks().forEach((track) => track.stop());
+        this.micStream = null;
+        this.micSource?.disconnect();
+        this.micSource = null;
       };
     } catch (err) {
-      console.warn("Microphone access unavailable or denied", err);
+      console.warn('Microphone access unavailable or denied', err);
       return () => {};
     }
   }
 
-  // Speak text using Web Speech API with SpeechSynthesis
-  public speak(
-    text: string,
-    onStart: () => void,
-    onEnd: () => void,
-    onSpeechBoundary?: (level: number) => void
-  ) {
-    if (this.isMuted || !('speechSynthesis' in window)) {
-      // Speech synthesis not available or muted - simulate speech duration
-      onStart();
-      const duration = Math.min(6000, Math.max(1800, text.length * 55));
-      let elapsed = 0;
-      const interval = setInterval(() => {
-        elapsed += 100;
-        if (onSpeechBoundary) {
-          onSpeechBoundary(0.3 + Math.sin(elapsed / 100) * 0.4);
-        }
-        if (elapsed >= duration) {
-          clearInterval(interval);
-          onEnd();
-        }
-      }, 100);
+  private chooseMaleVoice(): SpeechSynthesisVoice | undefined {
+    if (!this.voicesReady) this.refreshVoices();
+    const voices = this.voices.length ? this.voices : (window.speechSynthesis?.getVoices() || []);
+    if (!voices.length) return undefined;
+
+    const preferredMaleNames = [
+      'Microsoft Ravi',
+      'Ravi',
+      'Microsoft David',
+      'David',
+      'Microsoft Mark',
+      'Mark',
+      'Guy',
+      'Daniel',
+      'Alex',
+      'Google UK English Male',
+      'Google US English Male',
+      'Male',
+    ];
+
+    // Prefer an Indian English male voice when the browser exposes one.
+    for (const name of preferredMaleNames.slice(0, 2)) {
+      const exact = voices.find((v) => v.name.toLowerCase().includes(name.toLowerCase()) && /^en[-_]in/i.test(v.lang));
+      if (exact) return exact;
+    }
+
+    for (const name of preferredMaleNames) {
+      const match = voices.find((v) => v.name.toLowerCase().includes(name.toLowerCase()) && /^en/i.test(v.lang));
+      if (match) return match;
+    }
+
+    const indian = voices.find((v) => /^en[-_]in/i.test(v.lang));
+    if (indian) return indian;
+    return voices.find((v) => /^en[-_]gb/i.test(v.lang)) || voices.find((v) => /^en/i.test(v.lang));
+  }
+
+  public speak(text: string, onStart: () => void, onEnd: () => void, onSpeechBoundary?: (level: number) => void) {
+    if (!this.isMuted && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      this.refreshVoices();
+      const utterance = new SpeechSynthesisUtterance(text);
+      const voice = this.chooseMaleVoice();
+      if (voice) utterance.voice = voice;
+
+      utterance.lang = voice?.lang || 'en-IN';
+      utterance.pitch = 0.78;
+      utterance.rate = 1.02;
+      utterance.volume = 1;
+
+      let boundaryInterval: ReturnType<typeof setInterval> | null = null;
+      utterance.onstart = () => {
+        onStart();
+        let step = 0;
+        boundaryInterval = setInterval(() => {
+          step += 1;
+          onSpeechBoundary?.(0.18 + Math.abs(Math.sin(step * 0.42)) * 0.72);
+        }, 80);
+      };
+      utterance.onend = () => {
+        if (boundaryInterval) clearInterval(boundaryInterval);
+        onSpeechBoundary?.(0);
+        onEnd();
+      };
+      utterance.onerror = () => {
+        if (boundaryInterval) clearInterval(boundaryInterval);
+        onSpeechBoundary?.(0);
+        onEnd();
+      };
+
+      window.speechSynthesis.speak(utterance);
       return;
     }
 
-    window.speechSynthesis.cancel(); // Stop current speech
-    const utterance = new SpeechSynthesisUtterance(text);
-
-    // Pick a crisp English voice if possible
-    const voices = window.speechSynthesis.getVoices();
-    const jarvisVoice = voices.find(
-      (v) => v.lang.startsWith('en') && (v.name.includes('Daniel') || v.name.includes('UK') || v.name.includes('Google') || v.name.includes('Natural'))
-    ) || voices.find((v) => v.lang.startsWith('en'));
-
-    if (jarvisVoice) {
-      utterance.voice = jarvisVoice;
-    }
-
-    utterance.pitch = 0.95; // Slightly lower pitched for JARVIS authority
-    utterance.rate = 1.05;  // Slightly faster crisp speed
-
-    let boundaryInterval: any;
-
-    utterance.onstart = () => {
-      onStart();
-      let step = 0;
-      boundaryInterval = setInterval(() => {
-        step++;
-        if (onSpeechBoundary) {
-          onSpeechBoundary(0.2 + Math.abs(Math.sin(step * 0.4)) * 0.7);
-        }
-      }, 80);
-    };
-
-    utterance.onend = () => {
-      if (boundaryInterval) clearInterval(boundaryInterval);
-      onEnd();
-    };
-
-    utterance.onerror = () => {
-      if (boundaryInterval) clearInterval(boundaryInterval);
-      onEnd();
-    };
-
-    window.speechSynthesis.speak(utterance);
+    // Visual fallback when browser speech is unavailable or muted.
+    onStart();
+    const duration = Math.min(6000, Math.max(1400, text.length * 42));
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      elapsed += 100;
+      onSpeechBoundary?.(0.25 + Math.abs(Math.sin(elapsed / 120)) * 0.5);
+      if (elapsed >= duration) {
+        clearInterval(interval);
+        onSpeechBoundary?.(0);
+        onEnd();
+      }
+    }, 100);
   }
 
   public stopSpeaking() {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-    }
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   }
 }
 
