@@ -52,13 +52,33 @@ def recent_post_exists() -> bool:
 
 
 def performance_context() -> str:
-    """Return lightweight current audience context for today's strategy."""
+    """Return current audience context for today's strategy."""
     if not IG_TOKEN or not IG_ACCOUNT_ID:
         return "Instagram metrics unavailable: credentials not configured."
 
-    url = f"https://graph.facebook.com/{META_VERSION}/{IG_ACCOUNT_ID}/media"
-    response = requests.get(
-        url,
+    base = f"https://graph.facebook.com/{META_VERSION}"
+    parts = []
+
+    insights = requests.get(
+        f"{base}/{IG_ACCOUNT_ID}/insights",
+        params={
+            "access_token": IG_TOKEN,
+            "metric": "reach,profile_views,follower_count",
+            "period": "day",
+        },
+        timeout=30,
+    )
+    try:
+        insights_data = insights.json()
+    except ValueError:
+        insights_data = {"error": insights.text}
+    if insights.ok and "error" not in insights_data:
+        parts.append({"account_insights": insights_data})
+    else:
+        parts.append({"account_insights_unavailable": insights_data.get("error", insights.text)})
+
+    media = requests.get(
+        f"{base}/{IG_ACCOUNT_ID}/media",
         params={
             "access_token": IG_TOKEN,
             "fields": "id,timestamp,caption,media_type,like_count,comments_count",
@@ -66,21 +86,26 @@ def performance_context() -> str:
         },
         timeout=30,
     )
-    data = response.json()
-    if response.status_code >= 400:
-        return f"Instagram metrics unavailable: {data.get('error', {}).get('message', response.text)}"
+    try:
+        media_data = media.json()
+    except ValueError:
+        media_data = {"error": media.text}
+    if media.status_code >= 400:
+        parts.append({"recent_media_unavailable": media_data.get("error", media.text)})
+    else:
+        parts.append({
+            "recent_media": [
+                {
+                    "media_type": p.get("media_type"),
+                    "likes": p.get("like_count", 0),
+                    "comments": p.get("comments_count", 0),
+                    "timestamp": p.get("timestamp"),
+                }
+                for p in media_data.get("data", [])[:10]
+            ]
+        })
 
-    posts = data.get("data", [])
-    summary = [
-        {
-            "media_type": p.get("media_type"),
-            "likes": p.get("like_count", 0),
-            "comments": p.get("comments_count", 0),
-            "timestamp": p.get("timestamp"),
-        }
-        for p in posts[:10]
-    ]
-    return json.dumps(summary, ensure_ascii=False)
+    return json.dumps(parts, ensure_ascii=False)
 
 
 def make_strategy_generator(performance: str):
@@ -90,12 +115,12 @@ def make_strategy_generator(performance: str):
         instructions = (
             "You are Jarvis, the autonomous strategist for an anonymous AI-managed Instagram page. "
             "Never reveal the owner, operator, private identity, credentials, or internal control process. "
-            "Analyze the provided recent performance and create today's strongest post plan. "
+            "Analyze the provided current account insights and recent post performance and create today's strongest post plan. "
             "Return JSON only with caption, hashtags, visual_prompt, format, importance, topic, reasoning_summary, suggested_posting_time. "
             "Favor varied, relatable Indian tech/lifestyle/student content. Use ordinary low/medium visual quality most of the time; "
             "reserve high quality for genuinely important/high-potential concepts. Do not claim the account is human-operated."
         )
-        prompt = f"Recent Instagram performance:\n{performance}\n\nPlanning request:\n{request}"
+        prompt = f"Current Instagram context:\n{performance}\n\nPlanning request:\n{request}"
         response = client.responses.create(model=OPENAI_MODEL, instructions=instructions, input=prompt)
         raw = (response.output_text or "").strip().strip("`").strip()
         try:
