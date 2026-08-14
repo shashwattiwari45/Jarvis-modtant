@@ -1,19 +1,20 @@
-# Jarvis Modtant
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+</div>
 
-A Windows-7-friendly, low-overhead personal assistant with a modular package layout.
+# Run and deploy your AI Studio app
 
-The public entry point remains:
+This contains everything you need to run your app locally.
 
-```bash
-python jarvisvav1.py
-```
+View your app in AI Studio: https://ai.studio/apps/7fab3127-1b7d-48a5-8012-2b84280d2265
 
-The original implementation now lives in `jarvis/core.py`. Lightweight facades (`jarvis/voice.py`, `jarvis/desktop.py`, `jarvis/memory.py`, `jarvis/phone.py`, `jarvis/vision.py`, `jarvis/social.py`) provide stable import surfaces so deeper extraction can happen incrementally without changing behavior.
+## Run Locally
 
-Cloud-first mode remains:
+**Prerequisites:**  Node.js
 
-```bash
-python cloud_jarvis.py
-```
 
-Do not commit API keys or other secrets.
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
