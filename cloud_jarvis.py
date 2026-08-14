@@ -1,17 +1,8 @@
-"""
-Cloud-first launcher for the existing Jarvis desktop agent.
+"""Cloud-first launcher for the existing Jarvis desktop agent.
 
-Run this instead of jarvisvav1.py when the cloud connector is configured:
-    python cloud_jarvis.py
-
-Behavior:
-- Sends normal conversation to Jarvis Cloud first.
-- If Cloud says the request needs the PC, the existing local GPT/tool brain executes it.
-- Falls back to the local brain automatically if Cloud is unavailable.
-- Keeps a persistent Cloud session id.
-- Sends PC heartbeats in the background.
-- Pulls shared Cloud memory into the local context snapshot.
-- Mirrors safe local memory writes to the Cloud memory store.
+Run this instead of jarvisvav1.py when the cloud connector is configured.
+The local implementation is now in jarvis.core; this launcher monkey-patches
+that module directly so its main loop uses the cloud-first routing path.
 """
 
 import json
@@ -20,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-import jarvisvav1 as local_jarvis
+import jarvis.core as local_jarvis
 
 from cloud.jarvis_cloud_client import ask_cloud, configured, get_memory, heartbeat, set_memory
 
@@ -40,6 +31,8 @@ def _load_session():
 
 def _save_session(session_id: str):
     global _SESSION_ID
+    if not session_id:
+        return
     _SESSION_ID = session_id
     try:
         SESSION_FILE.write_text(json.dumps({"session_id": session_id}), encoding="utf-8")
@@ -79,8 +72,13 @@ def _mirror_fact_write(original_fn, key: str, value: str):
     return result
 
 
+LOCAL_THINK_AND_ACT = local_jarvis.think_and_act
+_ORIGINAL_REMEMBER_FACT = local_jarvis.remember_fact
+_ORIGINAL_REMEMBER_PERSONAL_CONTEXT = local_jarvis.remember_personal_context
+
+
 def cloud_first_think_and_act(user_text: str) -> str:
-    """Cloud first for conversation; local GPT/tool execution for PC actions."""
+    """Cloud-first conversation with automatic local PC-tool fallback."""
     if configured():
         global _SESSION_ID
         result = ask_cloud(user_text, _SESSION_ID)
@@ -89,27 +87,22 @@ def cloud_first_think_and_act(user_text: str) -> str:
             mode = result.get("mode", "chat")
             if mode == "chat":
                 return result.get("reply") or "I'm here, boss."
-            # Cloud identified a PC-only request. Preserve existing full local tool brain.
-            local_result = LOCAL_THINK_AND_ACT(user_text)
-            return local_result
+            if mode == "pc_action":
+                return LOCAL_THINK_AND_ACT(user_text)
     return LOCAL_THINK_AND_ACT(user_text)
 
 
-# Preserve the original implementation before replacing the global symbol used by main().
-LOCAL_THINK_AND_ACT = local_jarvis.think_and_act
-
-# Mirror safe memory writes without changing the existing tool schema.
-_ORIGINAL_REMEMBER_FACT = local_jarvis.remember_fact
-_ORIGINAL_REMEMBER_PERSONAL_CONTEXT = local_jarvis.remember_personal_context
-local_jarvis.remember_fact = lambda key, value: _mirror_fact_write(_ORIGINAL_REMEMBER_FACT, key, value)
-local_jarvis.remember_personal_context = lambda category, key, value: _mirror_memory_write(_ORIGINAL_REMEMBER_PERSONAL_CONTEXT, category, key, value)
-
-# main() looks up think_and_act globally, so replacing the module symbol is enough.
-local_jarvis.think_and_act = cloud_first_think_and_act
+def _install_cloud_hooks():
+    local_jarvis.think_and_act = cloud_first_think_and_act
+    local_jarvis.remember_fact = lambda key, value: _mirror_fact_write(_ORIGINAL_REMEMBER_FACT, key, value)
+    local_jarvis.remember_personal_context = lambda category, key, value: _mirror_memory_write(
+        _ORIGINAL_REMEMBER_PERSONAL_CONTEXT, category, key, value
+    )
 
 
 def main():
     _load_session()
+    _install_cloud_hooks()
     if configured():
         online = heartbeat("pc")
         print(f"[Jarvis Cloud] {'ONLINE' if online else 'OFFLINE - local fallback active'}")
