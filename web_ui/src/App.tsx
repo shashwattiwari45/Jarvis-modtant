@@ -14,6 +14,7 @@ export default function App() {
   const [automationMode, setAutomationMode] = useState<boolean>(false);
   const [audioLevel, setAudioLevel] = useState<number>(0);
   const [audioMuted, setAudioMuted] = useState<boolean>(false);
+  const [cloudSessionId, setCloudSessionId] = useState<string | null>(null);
 
   // UI Panels
   const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
@@ -32,6 +33,26 @@ export default function App() {
       timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
     },
   ]);
+
+  // Register this UI as a cloud-connected Jarvis device and keep presence alive.
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const sendHeartbeat = async () => {
+      try {
+        await fetch('/api/device/heartbeat', { method: 'POST' });
+      } catch {
+        // UI remains usable if the cloud is temporarily unavailable.
+      }
+    };
+
+    sendHeartbeat();
+    timer = setInterval(sendHeartbeat, 60_000);
+
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, []);
 
   // Automated Macro Tasks when Automation Mode is enabled
   const [tasks, setTasks] = useState<AutomationTask[]>([
@@ -65,44 +86,13 @@ export default function App() {
   const recognitionRef = useRef<any>(null);
   const stopMicRef = useRef<(() => void) | null>(null);
 
-  // Sound Mute Sync
   const handleToggleMute = () => {
     const nextMute = !audioMuted;
     setAudioMuted(nextMute);
     jarvisAudio.setMute(nextMute);
   };
 
-  // Toggle Automation Mode
-  const handleToggleAutomation = () => {
-    const nextMode = !automationMode;
-    setAutomationMode(nextMode);
-    jarvisAudio.playStateSound(nextMode ? 'automation_on' : 'automation_off');
-
-    if (nextMode) {
-      setIsAutomationOpen(true);
-      // Automatically trigger running macro tasks
-      triggerAutomatedTasks();
-
-      const newMsg: ChatMessage = {
-        id: Date.now().toString(),
-        role: 'system',
-        content: '[AUTOMATION OVERDRIVE ACTIVATED] Core ring shader converted to Crimson Red. Macro task subroutines running in background.',
-        timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
-      };
-      setMessages((prev) => [...prev, newMsg]);
-    } else {
-      const newMsg: ChatMessage = {
-        id: Date.now().toString(),
-        role: 'system',
-        content: '[AUTOMATION STANDBY] Core ring shader reverted to Cyan Blue.',
-        timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
-      };
-      setMessages((prev) => [...prev, newMsg]);
-    }
-  };
-
-  // Run tasks in automation mode
-  const triggerAutomatedTasks = () => {
+  const triggerAutomatedTasks = useCallback(() => {
     setTasks((prev) =>
       prev.map((t) => ({
         ...t,
@@ -136,6 +126,34 @@ export default function App() {
         );
       }
     }, 800);
+  }, []);
+
+  // Toggle Automation Mode
+  const handleToggleAutomation = () => {
+    const nextMode = !automationMode;
+    setAutomationMode(nextMode);
+    jarvisAudio.playStateSound(nextMode ? 'automation_on' : 'automation_off');
+
+    if (nextMode) {
+      setIsAutomationOpen(true);
+      triggerAutomatedTasks();
+
+      const newMsg: ChatMessage = {
+        id: Date.now().toString(),
+        role: 'system',
+        content: '[AUTOMATION OVERDRIVE ACTIVATED] Core ring shader converted to Crimson Red. Macro task subroutines running in background.',
+        timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+      };
+      setMessages((prev) => [...prev, newMsg]);
+    } else {
+      const newMsg: ChatMessage = {
+        id: Date.now().toString(),
+        role: 'system',
+        content: '[AUTOMATION STANDBY] Core ring shader reverted to Cyan Blue.',
+        timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+      };
+      setMessages((prev) => [...prev, newMsg]);
+    }
   };
 
   const handleTriggerCustomTask = (taskName: string) => {
@@ -174,7 +192,7 @@ export default function App() {
     }, 600);
   };
 
-  // Process User Query with Express API & Speech Synthesis
+  // Process User Query through Jarvis Cloud and preserve the cloud session across requests.
   const handleSendMessage = async (text: string) => {
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
@@ -184,8 +202,6 @@ export default function App() {
     };
 
     setMessages((prev) => [...prev, userMsg]);
-
-    // 1. Enter THINKING state (Ring rotates FAST!)
     setState('thinking');
     jarvisAudio.playStateSound('thinking');
 
@@ -196,11 +212,13 @@ export default function App() {
         body: JSON.stringify({
           message: text,
           automationMode,
+          session_id: cloudSessionId,
           history: messages.map((m) => ({ role: m.role, content: m.content })),
         }),
       });
 
       const data = await response.json();
+      if (data.session_id) setCloudSessionId(data.session_id);
       const replyText = data.reply || 'Request processed successfully, sir.';
 
       const botMsg: ChatMessage = {
@@ -212,32 +230,25 @@ export default function App() {
 
       setMessages((prev) => [...prev, botMsg]);
 
-      // 2. Speak response with voice (Ring rotates dynamically with voice modulation!)
       if (autoTTS) {
         jarvisAudio.speak(
           replyText,
-          () => {
-            setState('speaking');
-          },
+          () => setState('speaking'),
           () => {
             setState('idle');
             setAudioLevel(0);
           },
-          (level) => {
-            setAudioLevel(level);
-          }
+          (level) => setAudioLevel(level)
         );
       } else {
-        setTimeout(() => {
-          setState('idle');
-        }, 800);
+        setTimeout(() => setState('idle'), 800);
       }
     } catch (err) {
-      console.error('Error contacting JARVIS AI backend:', err);
+      console.error('Error contacting JARVIS Cloud:', err);
       const errorMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: 'I apologize, sir. A brief neural latency occurred. All local protocols remain active.',
+        content: 'I apologize, sir. The cloud link is temporarily unavailable. Local interface protocols remain active.',
         timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
       };
       setMessages((prev) => [...prev, errorMsg]);
@@ -248,7 +259,6 @@ export default function App() {
   // Toggle Voice Recognition / Microphone Listening Mode
   const handleToggleListen = async () => {
     if (state === 'listening') {
-      // Stop listening
       if (stopMicRef.current) {
         stopMicRef.current();
         stopMicRef.current = null;
@@ -263,20 +273,13 @@ export default function App() {
       return;
     }
 
-    // Stop speaking if currently speaking
     jarvisAudio.stopSpeaking();
-
-    // Enter LISTENING state (Ring rotates SLOW!)
     setState('listening');
     jarvisAudio.playStateSound('listening');
 
-    // Start mic audio level analyzer
-    const cleanupAnalyzer = await jarvisAudio.startMicAnalyzer((level) => {
-      setAudioLevel(level);
-    });
+    const cleanupAnalyzer = await jarvisAudio.startMicAnalyzer((level) => setAudioLevel(level));
     stopMicRef.current = cleanupAnalyzer;
 
-    // Check for browser SpeechRecognition API
     const SpeechRecognitionClass =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
@@ -311,7 +314,6 @@ export default function App() {
         console.warn('SpeechRecognition initialization error:', e);
       }
     } else {
-      // Fallback for browsers without SpeechRecognition
       setTimeout(() => {
         if (stopMicRef.current) stopMicRef.current();
         handleSendMessage('Run quick system diagnostic scan');
@@ -319,7 +321,6 @@ export default function App() {
     }
   };
 
-  // Test thinking fast rotation
   const handleTestThinking = () => {
     setIsDiagnosticsOpen(false);
     handleSendMessage('Simulate fast thinking routine');
@@ -327,22 +328,17 @@ export default function App() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-black select-none">
-      {/* Background WebGL Core Canvas Ring */}
       <JarvisCanvas
         state={state}
         automationMode={automationMode}
         audioLevel={audioLevel}
         onCanvasClick={() => {
-          if (!isChatOpen && !isAutomationOpen) {
-            setIsChatOpen(true);
-          }
+          if (!isChatOpen && !isAutomationOpen) setIsChatOpen(true);
         }}
       />
 
-      {/* CRT Scanline Overlay */}
       <div className="fixed inset-0 scanlines opacity-40 pointer-events-none z-10" />
 
-      {/* Top Header Bar */}
       <TopBar
         state={state}
         automationMode={automationMode}
@@ -352,7 +348,6 @@ export default function App() {
         onToggleMute={handleToggleMute}
       />
 
-      {/* Left Vertical Dock */}
       <LeftControlDock
         state={state}
         automationMode={automationMode}
@@ -364,7 +359,6 @@ export default function App() {
         isChatOpen={isChatOpen}
       />
 
-      {/* Bottom Control Bar */}
       <BottomControlBar
         state={state}
         automationMode={automationMode}
@@ -373,7 +367,6 @@ export default function App() {
         onToggleChat={() => setIsChatOpen(!isChatOpen)}
       />
 
-      {/* Sliding AI Chat Console Drawer */}
       <ChatDrawer
         isOpen={isChatOpen}
         onClose={() => setIsChatOpen(false)}
@@ -386,7 +379,6 @@ export default function App() {
         onToggleAutoTTS={() => setAutoTTS(!autoTTS)}
       />
 
-      {/* Automation Overdrive Red Mode Panel */}
       <AutomationPanel
         isOpen={isAutomationOpen}
         onClose={() => setIsAutomationOpen(false)}
@@ -394,7 +386,6 @@ export default function App() {
         onTriggerTask={handleTriggerCustomTask}
       />
 
-      {/* System Diagnostics Modal */}
       <SystemDiagnosticsModal
         isOpen={isDiagnosticsOpen}
         onClose={() => setIsDiagnosticsOpen(false)}

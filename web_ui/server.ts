@@ -19,11 +19,16 @@ function cloudHeaders(extra: Record<string, string> = {}) {
   return headers;
 }
 
-function cloudConfigured() { return Boolean(CLOUD_URL && CLOUD_SECRET); }
+function cloudConfigured() {
+  return Boolean(CLOUD_URL && CLOUD_SECRET);
+}
 
 async function cloudFetch(pathname: string, init: RequestInit = {}) {
   if (!cloudConfigured()) throw new Error("Jarvis Cloud is not configured");
-  return fetch(`${CLOUD_URL}${pathname}`, { ...init, headers: cloudHeaders((init.headers || {}) as Record<string, string>) });
+  return fetch(`${CLOUD_URL}${pathname}`, {
+    ...init,
+    headers: cloudHeaders((init.headers || {}) as Record<string, string>),
+  });
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -40,26 +45,67 @@ app.get("/api/health", async (_req, res) => {
 
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, history } = req.body || {};
+    const { message, history, session_id } = req.body || {};
     if (!message || typeof message !== "string") return res.status(400).json({ error: "Message is required" });
-    if (!cloudConfigured()) return res.status(503).json({ error: "Jarvis Cloud is not configured", reply: "Cloud connection is not configured on this interface, sir.", source: "web-local" });
-    const prompt = Array.isArray(history) && history.length ? `Recent conversation:\n${JSON.stringify(history.slice(-6))}\n\nCurrent request:\n${message}` : message;
-    const response = await cloudFetch("/ask", { method: "POST", body: JSON.stringify({ message: prompt }) });
+    if (!cloudConfigured()) {
+      return res.status(503).json({
+        error: "Jarvis Cloud is not configured",
+        reply: "Cloud connection is not configured on this interface, sir.",
+        source: "web-local",
+      });
+    }
+
+    const prompt = Array.isArray(history) && history.length
+      ? `Recent conversation:\n${JSON.stringify(history.slice(-6))}\n\nCurrent request:\n${message}`
+      : message;
+
+    const payload: Record<string, unknown> = { message: prompt };
+    if (typeof session_id === "string" && session_id.trim()) payload.session_id = session_id;
+
+    const response = await cloudFetch("/ask", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
     const data = await response.json();
-    return res.status(response.status).json({ reply: data.reply || "I'm here, boss.", mode: data.mode || "chat", session_id: data.session_id || null, device_id: DEVICE_ID, source: "jarvis-cloud" });
+    return res.status(response.status).json({
+      reply: data.reply || "I'm here, boss.",
+      mode: data.mode || "chat",
+      session_id: data.session_id || null,
+      device_id: DEVICE_ID,
+      source: "jarvis-cloud",
+    });
   } catch (error) {
     console.error("JARVIS Cloud chat error:", error);
-    return res.status(503).json({ error: "Cloud unavailable", reply: "I can't reach the cloud brain right now, sir.", source: "web-cloud-error" });
+    return res.status(503).json({
+      error: "Cloud unavailable",
+      reply: "I can't reach the cloud brain right now, sir.",
+      source: "web-cloud-error",
+    });
   }
 });
 
+// Private owner briefing for the anonymous Instagram operation.
+// The browser receives only the briefing text; Cloud/Meta credentials stay server-side.
 app.post("/api/instagram/brief", async (req, res) => {
   try {
-    const request = typeof req.body?.request === "string" && req.body.request.trim() ? req.body.request.trim() : "Give me today's Instagram status, audience performance, and the content you plan to post today. Keep the Instagram account identity anonymous.";
+    const request = typeof req.body?.request === "string" && req.body.request.trim()
+      ? req.body.request.trim()
+      : "Give me today's Instagram status, audience performance, and the content you plan to post today. Keep the Instagram account identity anonymous and discuss these details only as a private owner briefing.";
+
     if (!cloudConfigured()) return res.status(503).json({ error: "Jarvis Cloud is not configured" });
-    const response = await cloudFetch("/ask", { method: "POST", body: JSON.stringify({ message: request }) });
+
+    const response = await cloudFetch("/ask", {
+      method: "POST",
+      body: JSON.stringify({ message: request }),
+    });
     const data = await response.json();
-    return res.status(response.status).json({ reply: data.reply || "No Instagram briefing available.", mode: data.mode || "chat", source: "jarvis-cloud" });
+    return res.status(response.status).json({
+      reply: data.reply || "No Instagram briefing available.",
+      mode: data.mode || "chat",
+      session_id: data.session_id || null,
+      source: "jarvis-cloud",
+      privacy: "private-owner-briefing",
+    });
   } catch (error) {
     console.error("Instagram brief error:", error);
     return res.status(503).json({ error: "Instagram briefing unavailable" });
@@ -69,7 +115,10 @@ app.post("/api/instagram/brief", async (req, res) => {
 app.post("/api/device/heartbeat", async (_req, res) => {
   try {
     if (!cloudConfigured()) return res.status(503).json({ ok: false, error: "Cloud not configured" });
-    const response = await cloudFetch("/device/heartbeat", { method: "POST", body: JSON.stringify({ device_id: DEVICE_ID, kind: "web" }) });
+    const response = await cloudFetch("/device/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({ device_id: DEVICE_ID, kind: "web" }),
+    });
     return res.status(response.status).json(await response.json());
   } catch (error) {
     console.error("Heartbeat error:", error);
@@ -86,6 +135,11 @@ async function startServer() {
     app.use(express.static(distPath));
     app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
-  app.listen(PORT, "0.0.0.0", () => console.log(`JARVIS HUD running on http://0.0.0.0:${PORT}`));
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`JARVIS HUD running on http://0.0.0.0:${PORT}`);
+    console.log(`Jarvis Cloud: ${cloudConfigured() ? CLOUD_URL : "NOT CONFIGURED"}`);
+  });
 }
+
 startServer();
