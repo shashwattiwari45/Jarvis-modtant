@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+.env.*
+!.env.example
+!.env.gcp.example
+node_modules/
+web_ui/node_modules/
+web_ui/dist/
+.git/
+.gitignore
