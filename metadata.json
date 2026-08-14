@@ -1,6 +1,0 @@
-{
-  "name": "JARVIS HUD - AI Core",
-  "description": "Futuristic JARVIS holographic HUD interface featuring voice recognition, dynamic WebGL AI ring animations, automation modes, and real-time AI capabilities.",
-  "requestFramePermissions": ["microphone"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
