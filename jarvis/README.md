@@ -1,0 +1,1 @@
+Jarvis modularization package. The first stage moves the existing implementation into `jarvis/core.py` while preserving the existing `jarvisvav1.py` entry point.
