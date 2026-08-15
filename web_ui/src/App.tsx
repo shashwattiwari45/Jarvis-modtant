@@ -11,6 +11,7 @@ import { jarvisAudio } from './utils/audioSynthesizer';
 
 const CHAT_STORAGE_KEY = 'jarvis_web_chat_v2';
 const SESSION_STORAGE_KEY = 'jarvis_cloud_session_v2';
+const WAKE_MODE_KEY = 'jarvis_wake_mode_v1';
 
 function loadStoredMessages(): ChatMessage[] {
   try {
@@ -21,7 +22,7 @@ function loadStoredMessages(): ChatMessage[] {
   return [{
     id: 'init-1',
     role: 'assistant',
-    content: 'Good day, sir. All core matrices online. Persistent cloud memory is active.',
+    content: 'JARVIS online. Private memory, intelligent routing and wake control ready.',
     timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
   }];
 }
@@ -29,6 +30,18 @@ function loadStoredMessages(): ChatMessage[] {
 function loadStoredSession(): string | null {
   try { return localStorage.getItem(SESSION_STORAGE_KEY); } catch { return null; }
 }
+
+function loadWakeMode(): boolean {
+  try { return localStorage.getItem(WAKE_MODE_KEY) === '1'; } catch { return false; }
+}
+
+const WAKE_PHRASES = [
+  /\bwake up\s+jarvis\b/i,
+  /\bhey\s+jarvis\b/i,
+  /\bokay\s+jarvis\b/i,
+  /\bok\s+jarvis\b/i,
+];
+const SLEEP_PHRASE = /\b(?:go to sleep|sleep|stand by|standby)\s+jarvis\b/i;
 
 export default function App() {
   const [state, setState] = useState<JarvisState>('idle');
@@ -40,12 +53,26 @@ export default function App() {
   const [isAutomationOpen, setIsAutomationOpen] = useState(false);
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
   const [autoTTS, setAutoTTS] = useState(true);
+  const [wakeMode, setWakeMode] = useState(loadWakeMode);
   const [messages, setMessages] = useState<ChatMessage[]>(loadStoredMessages);
 
+  const recognitionRef = useRef<any>(null);
+  const stopMicRef = useRef<(() => void) | null>(null);
+  const startRecognitionRef = useRef<((wakeListening: boolean) => void) | null>(null);
+  const manualStopRef = useRef(false);
+  const wakeArmedRef = useRef(false);
+  const wakeModeRef = useRef(wakeMode);
+  const stateRef = useRef<JarvisState>(state);
+  const recognitionRunningRef = useRef(false);
+
+  useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => {
+    wakeModeRef.current = wakeMode;
+    try { localStorage.setItem(WAKE_MODE_KEY, wakeMode ? '1' : '0'); } catch {}
+  }, [wakeMode]);
   useEffect(() => {
     try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages.slice(-100))); } catch {}
   }, [messages]);
-
   useEffect(() => {
     try {
       if (cloudSessionId) localStorage.setItem(SESSION_STORAGE_KEY, cloudSessionId);
@@ -54,7 +81,7 @@ export default function App() {
 
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
-    const sendHeartbeat = async () => { try { await fetch('/api/device/heartbeat', { method: 'POST' }); } catch {} };
+    const sendHeartbeat = async () => { try { await fetch('/api/device/heartbeat', { method: 'POST', credentials: 'include' }); } catch {} };
     sendHeartbeat();
     timer = setInterval(sendHeartbeat, 60_000);
     return () => { if (timer) clearInterval(timer); };
@@ -66,8 +93,14 @@ export default function App() {
     { id: 'task-3', name: 'System Diagnostic Sweep', category: 'Maintenance', status: 'idle', progress: 0, logs: ['Standby mode.'] },
   ]);
 
-  const recognitionRef = useRef<any>(null);
-  const stopMicRef = useRef<(() => void) | null>(null);
+  const addSystemMessage = useCallback((content: string) => {
+    setMessages((prev) => [...prev, {
+      id: `sys-${Date.now()}-${Math.random()}`,
+      role: 'system',
+      content,
+      timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+    }]);
+  }, []);
 
   const handleToggleMute = () => {
     const nextMute = !audioMuted;
@@ -96,9 +129,9 @@ export default function App() {
     if (nextMode) {
       setIsAutomationOpen(true);
       triggerAutomatedTasks();
-      setMessages((prev) => [...prev, { id: Date.now().toString(), role: 'system', content: '[AUTOMATION OVERDRIVE ACTIVATED] Core ring converted to Crimson Red.', timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) }]);
+      addSystemMessage('[AUTOMATION OVERDRIVE ACTIVATED] Core ring converted to Crimson Red.');
     } else {
-      setMessages((prev) => [...prev, { id: Date.now().toString(), role: 'system', content: '[AUTOMATION STANDBY] Core ring reverted to Cyan Blue.', timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) }]);
+      addSystemMessage('[AUTOMATION STANDBY] Core ring reverted to Cyan Blue.');
     }
   };
 
@@ -117,8 +150,31 @@ export default function App() {
     }, 600);
   };
 
-  const handleSendMessage = async (text: string) => {
-    const userMsg: ChatMessage = { id: Date.now().toString(), role: 'user', content: text, timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) };
+  const handleSendMessage = useCallback(async (text: string) => {
+    const cleanText = text.trim();
+    if (!cleanText) return;
+
+    if (WAKE_PHRASES.some((pattern) => pattern.test(cleanText))) {
+      wakeModeRef.current = true;
+      setWakeMode(true);
+      wakeArmedRef.current = true;
+      addSystemMessage('[WAKE MODE] JARVIS is now listening continuously. Say “sleep Jarvis” to pause.');
+      return;
+    }
+    if (SLEEP_PHRASE.test(cleanText)) {
+      wakeArmedRef.current = false;
+      wakeModeRef.current = false;
+      setWakeMode(false);
+      addSystemMessage('[WAKE MODE] JARVIS is standing by.');
+      return;
+    }
+
+    const userMsg: ChatMessage = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: cleanText,
+      timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+    };
     const historyForRequest = messages.slice(-12).map((m) => ({ role: m.role, content: m.content }));
     setMessages((prev) => [...prev, userMsg]);
     setState('thinking');
@@ -127,31 +183,161 @@ export default function App() {
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, automationMode, session_id: cloudSessionId, history: historyForRequest }),
+        body: JSON.stringify({ message: cleanText, automationMode, session_id: cloudSessionId, history: historyForRequest }),
       });
       const data = await response.json();
+      if (response.status === 401) throw new Error('OWNER_AUTH_REQUIRED');
+      if (!response.ok) throw new Error(data.error || 'Cloud request failed');
       if (data.session_id) setCloudSessionId(data.session_id);
       const replyText = data.reply || 'Request processed successfully, sir.';
       setMessages((prev) => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: replyText, timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) }]);
 
       if (autoTTS) {
-        jarvisAudio.speak(replyText, () => setState('speaking'), () => { setState('idle'); setAudioLevel(0); }, (level) => setAudioLevel(level));
+        jarvisAudio.speak(
+          replyText,
+          () => setState('speaking'),
+          () => {
+            setState('idle');
+            setAudioLevel(0);
+            if (wakeModeRef.current && wakeArmedRef.current && !recognitionRunningRef.current) {
+              window.setTimeout(() => startRecognitionRef.current?.(true), 180);
+            }
+          },
+          (level) => setAudioLevel(level),
+        );
       } else {
-        setTimeout(() => setState('idle'), 800);
+        setTimeout(() => {
+          setState('idle');
+          if (wakeModeRef.current && wakeArmedRef.current && !recognitionRunningRef.current) {
+            startRecognitionRef.current?.(true);
+          }
+        }, 800);
       }
     } catch (err) {
       console.error('Error contacting JARVIS Cloud:', err);
-      setMessages((prev) => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: 'The cloud link is temporarily unavailable. Local interface protocols remain active.', timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) }]);
+      const message = err instanceof Error && err.message === 'OWNER_AUTH_REQUIRED'
+        ? 'Owner authentication expired. Reload the HUD to unlock JARVIS again.'
+        : 'The cloud link is temporarily unavailable. Local interface protocols remain active.';
+      setMessages((prev) => [...prev, { id: (Date.now() + 1).toString(), role: 'assistant', content: message, timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }) }]);
       setState('idle');
     }
-  };
+  }, [addSystemMessage, automationMode, autoTTS, cloudSessionId, messages]);
+
+  const stopRecognition = useCallback(() => {
+    manualStopRef.current = true;
+    try { recognitionRef.current?.stop(); } catch {}
+    recognitionRef.current = null;
+    recognitionRunningRef.current = false;
+  }, []);
+
+  const startRecognition = useCallback((wakeListening: boolean) => {
+    const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionClass) {
+      addSystemMessage('Voice recognition is unavailable in this browser. Try Chrome/Edge.');
+      return;
+    }
+
+    stopRecognition();
+    manualStopRef.current = false;
+    const recognition = new SpeechRecognitionClass();
+    recognition.continuous = wakeListening;
+    recognition.interimResults = true;
+    recognition.lang = 'en-IN';
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      recognitionRunningRef.current = true;
+      setState('listening');
+    };
+
+    recognition.onresult = (event: any) => {
+      let finalText = '';
+      let latestInterim = '';
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const transcript = event.results[i]?.[0]?.transcript || '';
+        if (event.results[i].isFinal) finalText += `${transcript} `;
+        else latestInterim += `${transcript} `;
+      }
+
+      if ((finalText || latestInterim).trim() && stateRef.current === 'speaking') {
+        jarvisAudio.stopSpeaking();
+      }
+
+      if (!finalText.trim()) return;
+      const transcript = finalText.trim();
+
+      if (!wakeListening) {
+        if (WAKE_PHRASES.some((pattern) => pattern.test(transcript))) {
+          wakeModeRef.current = true;
+          setWakeMode(true);
+          wakeArmedRef.current = true;
+          addSystemMessage('[WAKE MODE] JARVIS is now listening continuously.');
+          stopRecognition();
+          window.setTimeout(() => startRecognition(true), 120);
+          return;
+        }
+        stopRecognition();
+        stopMicRef.current?.();
+        handleSendMessage(transcript);
+        return;
+      }
+
+      if (!wakeArmedRef.current) {
+        if (WAKE_PHRASES.some((pattern) => pattern.test(transcript))) {
+          wakeArmedRef.current = true;
+          addSystemMessage('[WAKE] I\'m listening.');
+        }
+        return;
+      }
+
+      if (SLEEP_PHRASE.test(transcript)) {
+        wakeArmedRef.current = false;
+        wakeModeRef.current = false;
+        setWakeMode(false);
+        addSystemMessage('[WAKE MODE] JARVIS is standing by.');
+        return;
+      }
+
+      stopRecognition();
+      stopMicRef.current?.();
+      handleSendMessage(transcript);
+    };
+
+    recognition.onerror = (event: any) => {
+      recognitionRunningRef.current = false;
+      if (wakeListening && wakeModeRef.current && !manualStopRef.current && event?.error !== 'not-allowed') {
+        window.setTimeout(() => startRecognition(true), 500);
+      } else {
+        setState('idle');
+        setAudioLevel(0);
+      }
+    };
+
+    recognition.onend = () => {
+      recognitionRunningRef.current = false;
+      if (wakeListening && wakeModeRef.current && !manualStopRef.current) {
+        window.setTimeout(() => startRecognition(true), 250);
+      }
+    };
+
+    try {
+      recognition.start();
+      recognitionRef.current = recognition;
+    } catch (error) {
+      console.warn('SpeechRecognition initialization error:', error);
+      recognitionRunningRef.current = false;
+    }
+  }, [addSystemMessage, handleSendMessage, stopRecognition]);
+
+  startRecognitionRef.current = startRecognition;
 
   const handleToggleListen = async () => {
-    if (state === 'listening') {
+    if (recognitionRunningRef.current || state === 'listening') {
+      stopRecognition();
       stopMicRef.current?.();
       stopMicRef.current = null;
-      try { recognitionRef.current?.stop(); } catch {}
       setState('idle');
       setAudioLevel(0);
       return;
@@ -160,26 +346,16 @@ export default function App() {
     jarvisAudio.stopSpeaking();
     setState('listening');
     jarvisAudio.playStateSound('listening');
-    stopMicRef.current = await jarvisAudio.startMicAnalyzer((level) => setAudioLevel(level));
+    stopMicRef.current = await jarvisAudio.startMicAnalyzer((level) => {
+      setAudioLevel(level);
+      if (stateRef.current === 'speaking' && level > 0.10) jarvisAudio.stopSpeaking();
+    });
 
-    const SpeechRecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognitionClass) {
-      try {
-        const recognition = new SpeechRecognitionClass();
-        recognition.continuous = false;
-        recognition.interimResults = false;
-        recognition.lang = 'en-US';
-        recognition.onresult = (event: any) => {
-          const transcript = event.results[0][0].transcript;
-          if (transcript) { stopMicRef.current?.(); handleSendMessage(transcript); }
-        };
-        recognition.onerror = () => { stopMicRef.current?.(); setState('idle'); setAudioLevel(0); };
-        recognition.onend = () => stopMicRef.current?.();
-        recognition.start();
-        recognitionRef.current = recognition;
-      } catch (e) { console.warn('SpeechRecognition initialization error:', e); }
+    if (wakeModeRef.current) {
+      wakeArmedRef.current = false;
+      startRecognition(true);
     } else {
-      setTimeout(() => { stopMicRef.current?.(); handleSendMessage('Run quick system diagnostic scan'); }, 3500);
+      startRecognition(false);
     }
   };
 
