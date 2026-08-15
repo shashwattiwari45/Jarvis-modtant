@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 
@@ -10,11 +11,24 @@ const PORT = Number(process.env.PORT || 3000);
 const CLOUD_URL = (process.env.JARVIS_CLOUD_URL || "").replace(/\/$/, "");
 const CLOUD_SECRET = process.env.JARVIS_CLOUD_SECRET || "";
 const DEVICE_ID = process.env.JARVIS_DEVICE_ID || "web-ui";
+const OWNER_PASSWORD = process.env.JARVIS_OWNER_PASSWORD || "";
+const AUTH_SECRET = process.env.JARVIS_AUTH_SECRET || "";
+const OWNER_ID = "owner";
+const AUTH_COOKIE = "jarvis_owner";
+const AUTH_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+if (!OWNER_PASSWORD) throw new Error("JARVIS_OWNER_PASSWORD is required");
+if (!AUTH_SECRET) throw new Error("JARVIS_AUTH_SECRET is required");
 
 app.use(express.json({ limit: "1mb" }));
 
 function cloudHeaders(extra: Record<string, string> = {}) {
-  const headers: Record<string, string> = { "Content-Type": "application/json", "X-Device-ID": DEVICE_ID, ...extra };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-Device-ID": DEVICE_ID,
+    "X-Owner-ID": OWNER_ID,
+    ...extra,
+  };
   if (CLOUD_SECRET) headers.Authorization = `Bearer ${CLOUD_SECRET}`;
   return headers;
 }
@@ -31,6 +45,66 @@ async function cloudFetch(pathname: string, init: RequestInit = {}) {
   });
 }
 
+function hash(value: string) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function signAuthToken(expiresAt: number) {
+  const payload = `${OWNER_ID}:${expiresAt}`;
+  const signature = crypto.createHmac("sha256", AUTH_SECRET).update(payload).digest("hex");
+  return `${Buffer.from(payload).toString("base64url")}.${signature}`;
+}
+
+function isOwnerAuthenticated(req: express.Request) {
+  const raw = req.headers.cookie || "";
+  const match = raw.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${AUTH_COOKIE}=`));
+  if (!match) return false;
+  const token = decodeURIComponent(match.slice(`${AUTH_COOKIE}=`.length));
+  const [encodedPayload, signature] = token.split(".");
+  if (!encodedPayload || !signature) return false;
+  try {
+    const payload = Buffer.from(encodedPayload, "base64url").toString("utf8");
+    const [ownerId, expiryRaw] = payload.split(":");
+    const expiry = Number(expiryRaw);
+    if (ownerId !== OWNER_ID || !Number.isFinite(expiry) || expiry < Math.floor(Date.now() / 1000)) return false;
+    const expected = crypto.createHmac("sha256", AUTH_SECRET).update(payload).digest("hex");
+    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+function requireOwner(req: express.Request, res: express.Response) {
+  if (isOwnerAuthenticated(req)) return true;
+  res.status(401).json({ error: "Owner authentication required", authenticated: false });
+  return false;
+}
+
+function setOwnerCookie(res: express.Response) {
+  const expiresAt = Math.floor(Date.now() / 1000) + AUTH_TTL_SECONDS;
+  const token = signAuthToken(expiresAt);
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `${AUTH_COOKIE}=${encodeURIComponent(token)}; Max-Age=${AUTH_TTL_SECONDS}; HttpOnly; SameSite=Strict; Path=/${secure}`);
+}
+
+app.get("/api/auth/me", (req, res) => {
+  res.json({ authenticated: isOwnerAuthenticated(req) });
+});
+
+app.post("/api/auth/login", (req, res) => {
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  const valid = crypto.timingSafeEqual(Buffer.from(hash(password)), Buffer.from(hash(OWNER_PASSWORD)));
+  if (!valid) return res.status(401).json({ authenticated: false, error: "Access denied" });
+  setOwnerCookie(res);
+  return res.json({ authenticated: true });
+});
+
+app.post("/api/auth/logout", (_req, res) => {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `${AUTH_COOKIE}=; Max-Age=0; HttpOnly; SameSite=Strict; Path=/${secure}`);
+  return res.json({ authenticated: false });
+});
+
 app.get("/api/health", async (_req, res) => {
   if (!cloudConfigured()) return res.json({ status: "local", system: "JARVIS HUD", cloud: false });
   try {
@@ -44,6 +118,7 @@ app.get("/api/health", async (_req, res) => {
 });
 
 app.post("/api/chat", async (req, res) => {
+  if (!requireOwner(req, res)) return;
   try {
     const { message, history, session_id } = req.body || {};
     if (!message || typeof message !== "string") return res.status(400).json({ error: "Message is required" });
@@ -56,7 +131,7 @@ app.post("/api/chat", async (req, res) => {
     }
 
     const prompt = Array.isArray(history) && history.length
-      ? `Recent conversation:\n${JSON.stringify(history.slice(-6))}\n\nCurrent request:\n${message}`
+      ? `Recent conversation:\n${JSON.stringify(history.slice(-12))}\n\nCurrent request:\n${message}`
       : message;
 
     const payload: Record<string, unknown> = { message: prompt };
@@ -73,6 +148,9 @@ app.post("/api/chat", async (req, res) => {
       session_id: data.session_id || null,
       device_id: DEVICE_ID,
       source: "jarvis-cloud",
+      model: data.model || null,
+      web_search: Boolean(data.web_search),
+      memory_saved: data.memory_saved || [],
     });
   } catch (error) {
     console.error("JARVIS Cloud chat error:", error);
@@ -84,9 +162,8 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// Private owner briefing for the anonymous Instagram operation.
-// The browser receives only the briefing text; Cloud/Meta credentials stay server-side.
 app.post("/api/instagram/brief", async (req, res) => {
+  if (!requireOwner(req, res)) return;
   try {
     const request = typeof req.body?.request === "string" && req.body.request.trim()
       ? req.body.request.trim()
@@ -112,7 +189,8 @@ app.post("/api/instagram/brief", async (req, res) => {
   }
 });
 
-app.post("/api/device/heartbeat", async (_req, res) => {
+app.post("/api/device/heartbeat", async (req, res) => {
+  if (!requireOwner(req, res)) return;
   try {
     if (!cloudConfigured()) return res.status(503).json({ ok: false, error: "Cloud not configured" });
     const response = await cloudFetch("/device/heartbeat", {
