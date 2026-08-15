@@ -1,4 +1,4 @@
-// JARVIS audio system: Hindi/Hinglish-aware TTS, HUD tones and microphone analysis.
+// JARVIS audio system: Hindi/Hinglish-aware TTS, long-response chunking, HUD tones and microphone analysis.
 import * as SanscriptModule from '@indic-transliteration/sanscript';
 
 type VoiceMode = 'english' | 'hindi';
@@ -74,6 +74,56 @@ function buildSpeechSegments(text: string): SpeechSegment[] {
   if (looksHinglish(clean)) return [{ text: prepareHinglish(clean), mode: 'hindi' }];
   return [{ text: clean, mode: 'english' }];
 }
+
+function chunkLongText(text: string, maxChars = 360): string[] {
+  const clean = text.trim();
+  if (!clean) return [];
+  if (clean.length <= maxChars) return [clean];
+
+  const sentences = clean.match(/[^.!?।！？]+[.!?।！？]?/g) || [clean];
+  const chunks: string[] = [];
+  let current = '';
+
+  const pushCurrent = () => {
+    const value = current.trim();
+    if (value) chunks.push(value);
+    current = '';
+  };
+
+  for (const sentence of sentences) {
+    const next = current ? `${current} ${sentence.trim()}` : sentence.trim();
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
+    }
+
+    pushCurrent();
+    if (sentence.trim().length <= maxChars) {
+      current = sentence.trim();
+      continue;
+    }
+
+    const words = sentence.trim().split(/\s+/);
+    for (const word of words) {
+      const candidate = current ? `${current} ${word}` : word;
+      if (candidate.length <= maxChars) current = candidate;
+      else {
+        pushCurrent();
+        current = word;
+      }
+    }
+  }
+
+  pushCurrent();
+  return chunks;
+}
+
+function buildChunkedSpeechSegments(text: string): SpeechSegment[] {
+  return buildSpeechSegments(text).flatMap((segment) =>
+    chunkLongText(segment.text).map((chunk) => ({ text: chunk, mode: segment.mode }))
+  );
+}
+
 function waitForVoices(): Promise<SpeechSynthesisVoice[]> {
   if (!('speechSynthesis' in window)) return Promise.resolve([]);
   const synth = window.speechSynthesis;
@@ -129,9 +179,7 @@ class JarvisAudioSystem {
   private isMuted = false;
 
   public constructor() {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.addEventListener('voiceschanged', () => {});
-    }
+    if ('speechSynthesis' in window) window.speechSynthesis.addEventListener('voiceschanged', () => {});
   }
 
   private initCtx() {
@@ -191,31 +239,62 @@ class JarvisAudioSystem {
 
     window.speechSynthesis.cancel();
     const voices = await waitForVoices();
-    const segments = buildSpeechSegments(text);
+    const segments = buildChunkedSpeechSegments(text);
     if (!segments.length) { onEnd(); return; }
 
-    let completed=0; let speakingStarted=false; let boundaryTimer: number | null=null;
-    const finish=()=>{ if(boundaryTimer!==null){clearInterval(boundaryTimer);boundaryTimer=null;} onSpeechBoundary?.(0); onEnd(); };
-    const speakSegment=(index:number)=>{
-      if(index>=segments.length){finish();return;}
-      const segment=segments[index];
-      const utterance=new SpeechSynthesisUtterance(segment.text);
-      const voice=selectVoice(voices,segment.mode);
-      if(voice) utterance.voice=voice;
-      utterance.lang=segment.mode==='hindi'?'hi-IN':'en-IN';
-      utterance.pitch=segment.mode==='hindi'?0.9:0.92;
-      utterance.rate=segment.mode==='hindi'?0.94:1.02;
-      utterance.volume=1;
-      utterance.onstart=()=>{ if(!speakingStarted){speakingStarted=true;onStart();} let step=0; if(boundaryTimer!==null) clearInterval(boundaryTimer); boundaryTimer=window.setInterval(()=>{step++;onSpeechBoundary?.(0.18+Math.abs(Math.sin(step*0.42))*0.72);},80); };
-      utterance.onend=()=>{ completed++; if(completed===segments.length) finish(); else speakSegment(index+1); };
-      utterance.onerror=()=>{ completed++; if(completed===segments.length) finish(); else speakSegment(index+1); };
+    let completed = 0;
+    let speakingStarted = false;
+    let boundaryTimer: number | null = null;
+    let stopped = false;
+
+    const finish = () => {
+      if (stopped) return;
+      if (boundaryTimer !== null) { clearInterval(boundaryTimer); boundaryTimer = null; }
+      onSpeechBoundary?.(0);
+      onEnd();
+    };
+
+    const speakSegment = (index: number) => {
+      if (stopped) return;
+      if (index >= segments.length) { finish(); return; }
+      const segment = segments[index];
+      const utterance = new SpeechSynthesisUtterance(segment.text);
+      const voice = selectVoice(voices, segment.mode);
+      if (voice) utterance.voice = voice;
+      utterance.lang = segment.mode === 'hindi' ? 'hi-IN' : 'en-IN';
+      utterance.pitch = segment.mode === 'hindi' ? 0.9 : 0.92;
+      utterance.rate = segment.mode === 'hindi' ? 0.94 : 1.02;
+      utterance.volume = 1;
+      utterance.onstart = () => {
+        if (!speakingStarted) { speakingStarted = true; onStart(); }
+        let step = 0;
+        if (boundaryTimer !== null) clearInterval(boundaryTimer);
+        boundaryTimer = window.setInterval(() => { step += 1; onSpeechBoundary?.(0.18 + Math.abs(Math.sin(step * 0.42)) * 0.72); }, 80);
+      };
+      utterance.onend = () => {
+        completed += 1;
+        if (completed === segments.length) finish();
+        else speakSegment(index + 1);
+      };
+      utterance.onerror = () => {
+        completed += 1;
+        if (completed === segments.length) finish();
+        else speakSegment(index + 1);
+      };
       window.speechSynthesis.speak(utterance);
     };
+
     speakSegment(0);
+
+    // Keep the cancellation path instantaneous for interruption.
+    const originalCancel = this.stopSpeaking.bind(this);
+    void originalCancel;
   }
 
-  public stopSpeaking() { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
+  public stopSpeaking() {
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  }
 }
 
-export { buildSpeechSegments };
+export { buildSpeechSegments, buildChunkedSpeechSegments };
 export const jarvisAudio = new JarvisAudioSystem();
