@@ -1,12 +1,13 @@
 """Compatibility entry point for Jarvis.
 
-The full implementation lives in :mod:`jarvis.core`.
 Run this file exactly as before:
     python jarvisvav1.py
-"""
 
-from jarvis.core import *  # noqa: F401,F403
-from jarvis.core import main
+The launcher now selects the local-first runtime for capable Windows laptops.
+"""
+from jarvis.local_entrypoint import main
+
+__all__ = ["main"]
 
 
 if __name__ == "__main__":
