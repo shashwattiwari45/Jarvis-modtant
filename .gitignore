@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.venv/
+.venv-*/
+node_modules/
+web_ui/node_modules/
+web_ui/dist/
+web_ui/release/
+__pycache__/
+*.pyc
+*.pyo
+*.log
