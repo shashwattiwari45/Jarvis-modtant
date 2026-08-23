@@ -38,32 +38,59 @@ function spawnProcess(command, args, options, label) {
 }
 
 function startPythonBackend() {
-  const pythonCwd = runtimeRoot;
-  const args = ["-m", "jarvis.local_entrypoint"];
-  pythonProcess = spawnProcess(pythonCommand, args, { cwd: pythonCwd }, "JARVIS-PYTHON");
+  pythonProcess = spawnProcess(
+    pythonCommand,
+    ["-m", "jarvis.local_entrypoint"],
+    { cwd: runtimeRoot },
+    "JARVIS-PYTHON",
+  );
 }
 
 function startWebServer() {
   if (DEV_MODE) {
-    uiProcess = spawnProcess(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "dev"], {
-      cwd: webUiRoot,
-      env: { PORT: String(PORT), NODE_ENV: "development" },
-    }, "JARVIS-HUD");
-  } else {
-    const serverPath = path.join(webUiRoot, "dist", "server.cjs");
-    if (!fs.existsSync(serverPath)) {
-      throw new Error(`Built HUD server not found: ${serverPath}. Run npm run build first.`);
-    }
-    uiProcess = spawnProcess(process.execPath, [serverPath], {
-      cwd: webUiRoot,
-      env: { PORT: String(PORT), NODE_ENV: "production" },
-    }, "JARVIS-HUD");
+    uiProcess = spawnProcess(
+      process.platform === "win32" ? "npm.cmd" : "npm",
+      ["run", "dev"],
+      { cwd: webUiRoot, env: { PORT: String(PORT), NODE_ENV: "development" } },
+      "JARVIS-HUD",
+    );
+    return;
   }
+
+  const serverPath = path.join(webUiRoot, "dist", "server.cjs");
+  if (!fs.existsSync(serverPath)) {
+    throw new Error(`Built HUD server not found: ${serverPath}. Run npm run build first.`);
+  }
+
+  // Electron ships with a Node runtime. ELECTRON_RUN_AS_NODE lets the same
+  // executable host the bundled Express server without requiring Node on the
+  // end user's PATH.
+  uiProcess = spawnProcess(
+    process.execPath,
+    [serverPath],
+    {
+      cwd: process.env.TEMP || process.env.TMP || process.resourcesPath,
+      env: {
+        PORT: String(PORT),
+        NODE_ENV: "production",
+        ELECTRON_RUN_AS_NODE: "1",
+        JARVIS_WEB_ROOT: webUiRoot,
+      },
+    },
+    "JARVIS-HUD",
+  );
 }
 
 function waitForHttp(url, timeoutMs = 20000) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
+    const retry = () => {
+      if (Date.now() - started >= timeoutMs) {
+        reject(new Error(`JARVIS HUD did not start on ${url}`));
+        return;
+      }
+      setTimeout(attempt, 250);
+    };
     const attempt = () => {
       const request = http.get(url, (response) => {
         response.resume();
@@ -75,10 +102,6 @@ function waitForHttp(url, timeoutMs = 20000) {
         request.destroy();
         retry();
       });
-    };
-    const retry = () => {
-      if (Date.now() - started >= timeoutMs) return reject(new Error(`JARVIS HUD did not start on ${url}`));
-      setTimeout(attempt, 250);
     };
     attempt();
   });
@@ -103,9 +126,7 @@ function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("https://") || url.startsWith("http://")) {
-      shell.openExternal(url);
-    }
+    if (url.startsWith("https://") || url.startsWith("http://")) shell.openExternal(url);
     return { action: "deny" };
   });
 
@@ -124,8 +145,8 @@ async function boot() {
   await app.whenReady();
   app.setAppUserModelId("com.jarvis.hud");
 
-  // The Render cloud service is intentionally NOT owned by this process.
-  // Closing/shutting down the desktop app therefore cannot stop cloud handling.
+  // Render/cloud is deliberately NOT owned by this process. Closing the
+  // desktop app or shutting down Windows therefore does not stop cloud work.
   startPythonBackend();
   startWebServer();
 
