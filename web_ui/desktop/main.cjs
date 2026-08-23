@@ -23,18 +23,34 @@ function log(prefix, data) {
 }
 
 function spawnProcess(command, args, options, label) {
-  const child = spawn(command, args, {
+  const spawnOptions = {
     cwd: options.cwd,
     env: { ...process.env, ...(options.env || {}) },
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
-  });
+  };
 
+  // Windows cannot reliably spawn .cmd shims directly from every Electron
+  // runtime. Use cmd.exe explicitly for command shims such as npm.cmd.
+  if (process.platform === "win32" && options.windowsShell) {
+    const commandLine = [command, ...args]
+      .map((value) => `"${String(value).replace(/"/g, '\\"')}"`)
+      .join(" ");
+    const child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", commandLine], spawnOptions);
+    attachProcessLogging(child, label);
+    return child;
+  }
+
+  const child = spawn(command, args, spawnOptions);
+  attachProcessLogging(child, label);
+  return child;
+}
+
+function attachProcessLogging(child, label) {
   child.stdout.on("data", (data) => log(label, data));
   child.stderr.on("data", (data) => log(`${label}:ERR`, data));
   child.on("error", (error) => console.error(`[${label}] failed:`, error));
   child.on("exit", (code, signal) => console.log(`[${label}] exited code=${code} signal=${signal || "none"}`));
-  return child;
 }
 
 function startPythonBackend() {
@@ -49,9 +65,13 @@ function startPythonBackend() {
 function startWebServer() {
   if (DEV_MODE) {
     uiProcess = spawnProcess(
-      process.platform === "win32" ? "npm.cmd" : "npm",
+      "npm",
       ["run", "dev"],
-      { cwd: webUiRoot, env: { PORT: String(PORT), NODE_ENV: "development" } },
+      {
+        cwd: webUiRoot,
+        env: { PORT: String(PORT), NODE_ENV: "development" },
+        windowsShell: process.platform === "win32",
+      },
       "JARVIS-HUD",
     );
     return;
