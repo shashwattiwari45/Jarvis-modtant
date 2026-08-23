@@ -1,7 +1,8 @@
 """Local microphone STT for JARVIS.
 
 Uses sounddevice for capture and faster-whisper for offline transcription.
-It avoids the SpeechRecognition/PyAudio dependency for the primary local path.
+The local path is designed for an i5-class Windows laptop: short wake/listen
+windows, adaptive noise detection, a small pre-roll buffer, and INT8 Whisper.
 """
 from __future__ import annotations
 
@@ -45,52 +46,74 @@ def _rms(samples: np.ndarray) -> float:
 
 def record_until_silence(
     sample_rate: int = 16000,
-    max_seconds: float = 10.0,
-    start_timeout: float = 5.0,
-    silence_seconds: float = 0.85,
+    max_seconds: float = 12.0,
+    start_timeout: float = 2.5,
+    silence_seconds: float = 0.70,
 ):
+    """Capture one utterance with adaptive noise gating and a short pre-roll."""
     if sd is None:
         raise RuntimeError("sounddevice is not installed.")
 
-    block_seconds = 0.1
+    block_seconds = 0.10
     block_size = int(sample_rate * block_seconds)
     calibration_blocks = max(1, int(0.5 / block_seconds))
+    pre_roll_blocks = max(1, int(0.25 / block_seconds))
     blocks = []
     noise_samples = []
+    pre_roll = []
+    configured_device = os.getenv("JARVIS_INPUT_DEVICE", "").strip()
+    device = configured_device if configured_device else None
 
-    with sd.InputStream(
-        samplerate=sample_rate,
-        channels=1,
-        dtype="int16",
-        blocksize=block_size,
-    ) as stream:
-        for _ in range(calibration_blocks):
-            data, _ = stream.read(block_size)
-            noise_samples.append(data[:, 0].copy())
+    print("[JARVIS STT] Listening for wake word or command...")
 
-        noise = _rms(np.concatenate(noise_samples))
-        threshold = max(350.0, noise * 2.2)
-        started = False
-        last_voice_at = time.monotonic()
-        deadline = time.monotonic() + max_seconds
-        start_deadline = time.monotonic() + start_timeout
+    try:
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=block_size,
+            device=device,
+        ) as stream:
+            for _ in range(calibration_blocks):
+                data, _ = stream.read(block_size)
+                noise_samples.append(data[:, 0].copy())
 
-        while time.monotonic() < deadline:
-            data, _ = stream.read(block_size)
-            mono = data[:, 0].copy()
-            level = _rms(mono)
-            now = time.monotonic()
+            noise = _rms(np.concatenate(noise_samples))
+            threshold = max(350.0, noise * 2.2)
+            started = False
+            last_voice_at = time.monotonic()
+            deadline = time.monotonic() + max_seconds
+            start_deadline = time.monotonic() + start_timeout
 
-            if level >= threshold:
-                started = True
-                last_voice_at = now
+            while time.monotonic() < deadline:
+                data, _ = stream.read(block_size)
+                mono = data[:, 0].copy()
+                level = _rms(mono)
+                now = time.monotonic()
 
-            if started:
-                blocks.append(mono)
-                if now - last_voice_at >= silence_seconds:
+                if not started:
+                    pre_roll.append(mono)
+                    if len(pre_roll) > pre_roll_blocks:
+                        pre_roll.pop(0)
+
+                if level >= threshold:
+                    if not started:
+                        blocks.extend(pre_roll)
+                        print("[JARVIS STT] Voice detected — transcribing...")
+                    started = True
+                    last_voice_at = now
+
+                if started:
+                    blocks.append(mono)
+                    if now - last_voice_at >= silence_seconds:
+                        break
+                elif now >= start_deadline:
+                    print("[JARVIS STT] No speech detected; staying in wake-listening mode.")
                     break
-            elif now >= start_deadline:
-                break
+    except Exception as exc:
+        if configured_device:
+            raise RuntimeError(f"Microphone device '{configured_device}' failed: {exc}") from exc
+        raise RuntimeError(f"Microphone capture failed: {exc}") from exc
 
     if not blocks:
         return np.empty(0, dtype=np.int16), sample_rate
@@ -116,7 +139,7 @@ def transcribe(samples: np.ndarray, sample_rate: int, model=None) -> str:
 
         segments, _ = active_model.transcribe(
             path,
-            beam_size=3,
+            beam_size=2,
             vad_filter=True,
             condition_on_previous_text=False,
         )
@@ -134,8 +157,8 @@ def listen(existing_model=None) -> str:
         samples, rate = record_until_silence()
         text = transcribe(samples, rate, existing_model)
         if text:
-            print(f"You: {text}")
-        return text
+            print(f"[JARVIS STT] You: {text}")
+        return text.lower().strip()
     except Exception as exc:
-        print(f"[Local STT] {exc}")
+        print(f"[JARVIS STT] {exc}")
         return ""
