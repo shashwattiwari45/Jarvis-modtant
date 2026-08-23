@@ -22,6 +22,13 @@ function log(prefix, data) {
   if (text) console.log(`[${prefix}] ${text}`);
 }
 
+function attachProcessLogging(child, label) {
+  child.stdout.on("data", (data) => log(label, data));
+  child.stderr.on("data", (data) => log(`${label}:ERR`, data));
+  child.on("error", (error) => console.error(`[${label}] failed:`, error));
+  child.on("exit", (code, signal) => console.log(`[${label}] exited code=${code} signal=${signal || "none"}`));
+}
+
 function spawnProcess(command, args, options, label) {
   const spawnOptions = {
     cwd: options.cwd,
@@ -30,12 +37,15 @@ function spawnProcess(command, args, options, label) {
     stdio: ["ignore", "pipe", "pipe"],
   };
 
-  // Windows cannot reliably spawn .cmd shims directly from every Electron
-  // runtime. Use cmd.exe explicitly for command shims such as npm.cmd.
   if (process.platform === "win32" && options.windowsShell) {
-    const commandLine = [command, ...args]
-      .map((value) => `"${String(value).replace(/"/g, '\\"')}"`)
-      .join(" ");
+    // Electron can inherit an npm lifecycle PATH that does not resolve npm.cmd
+    // when the command is passed as a quoted executable. Let cmd.exe resolve
+    // npm from PATH instead, and only quote individual arguments when needed.
+    const quoteArg = (value) => {
+      const text = String(value);
+      return /[\s&()^|<>]/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
+    };
+    const commandLine = [command, ...args].map(quoteArg).join(" ");
     const child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", commandLine], spawnOptions);
     attachProcessLogging(child, label);
     return child;
@@ -44,13 +54,6 @@ function spawnProcess(command, args, options, label) {
   const child = spawn(command, args, spawnOptions);
   attachProcessLogging(child, label);
   return child;
-}
-
-function attachProcessLogging(child, label) {
-  child.stdout.on("data", (data) => log(label, data));
-  child.stderr.on("data", (data) => log(`${label}:ERR`, data));
-  child.on("error", (error) => console.error(`[${label}] failed:`, error));
-  child.on("exit", (code, signal) => console.log(`[${label}] exited code=${code} signal=${signal || "none"}`));
 }
 
 function startPythonBackend() {
@@ -82,9 +85,6 @@ function startWebServer() {
     throw new Error(`Built HUD server not found: ${serverPath}. Run npm run build first.`);
   }
 
-  // Electron ships with a Node runtime. ELECTRON_RUN_AS_NODE lets the same
-  // executable host the bundled Express server without requiring Node on the
-  // end user's PATH.
   uiProcess = spawnProcess(
     process.execPath,
     [serverPath],
