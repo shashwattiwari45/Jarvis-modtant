@@ -38,7 +38,7 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.24"
   },
   "build": {
     "appId": "com.jarvis.hud",
@@ -50,6 +50,18 @@
       "dist/**/*",
       "desktop/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../jarvis",
+        "to": "jarvis-runtime/jarvis",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+      },
+      {
+        "from": "../phone_jarvis",
+        "to": "jarvis-runtime/phone_jarvis",
+        "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc"]
+      }
     ],
     "win": {
       "target": [
