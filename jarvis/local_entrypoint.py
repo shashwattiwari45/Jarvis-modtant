@@ -1,9 +1,8 @@
-"""Local-first JARVIS launcher.
+"""Stable local launcher for JARVIS.
 
-Keeps the existing cloud brain/tool system while preferring local Whisper +
-sounddevice for microphone input on capable Windows laptops. Common Windows
-app launches are handled locally first; everything else remains on the normal
-JARVIS tool-calling path.
+Use the mature core microphone/STT pipeline. The newer local VAD wrapper was
+causing speech-detection regressions by replacing core.listen at startup.
+Local deterministic actions remain available through the action router.
 """
 from __future__ import annotations
 
@@ -12,32 +11,20 @@ import os
 
 from .hardware_profile import PROFILE, apply_process_tuning
 
-# Tune the CPU backend before importing jarvis.core/faster-whisper.
+# Keep CPU settings conservative without replacing core's voice pipeline.
 os.environ.setdefault("OMP_NUM_THREADS", str(PROFILE.whisper_threads))
 os.environ.setdefault("CT2_INTER_THREADS", "1")
 os.environ.setdefault("CT2_INTRA_THREADS", str(PROFILE.whisper_threads))
-
 apply_process_tuning()
 
 from . import core  # noqa: E402
 from .intelligence import install as install_intelligence  # noqa: E402
 from .local_actions import try_execute  # noqa: E402
-from .local_stt import audio_was_detected, listen as local_listen  # noqa: E402
 
 
 def _install_action_router() -> None:
-    """Give voice commands the same action path as HUD commands.
-
-    A few latency-sensitive Windows commands are deterministic and do not need
-    an LLM round trip. Unmatched requests are delegated untouched to core's
-    existing think_and_act implementation.
-    """
     original = getattr(core, "think_and_act", None)
-    if not callable(original):
-        print("[JARVIS Local] Existing think_and_act() was not found; keeping core unchanged.")
-        return
-
-    if getattr(original, "_jarvis_local_router", False):
+    if not callable(original) or getattr(original, "_jarvis_local_router", False):
         return
 
     if inspect.iscoroutinefunction(original):
@@ -59,18 +46,13 @@ def _install_action_router() -> None:
 
 
 def main() -> None:
-    # Reuse core's already-loaded Whisper model when available so the local
-    # runtime does not keep two large speech models in memory.
-    def listen_with_audio_lock():
-        with core.AUDIO_LOCK:
-            return local_listen(getattr(core, "_whisper_model", None))
-
-    core.listen = listen_with_audio_lock
-    core.audio_was_detected = audio_was_detected
+    # IMPORTANT: do not monkey-patch core.listen. Core already has Whisper STT,
+    # Google fallback, adaptive SpeechRecognition settings, Hindi detection,
+    # interruption-aware TTS, and the complete voice/tool loop.
     install_intelligence(core)
     _install_action_router()
     print(
-        f"[JARVIS Local] {PROFILE.whisper_model} Whisper / "
+        f"[JARVIS Local] Stable core voice / Whisper + Google fallback / "
         f"{PROFILE.whisper_threads} CPU threads"
     )
     print("[JARVIS Local] Voice + local Windows action routing enabled.")
