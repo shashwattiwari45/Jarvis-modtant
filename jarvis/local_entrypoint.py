@@ -1,17 +1,14 @@
-"""Stable local launcher for JARVIS.
-
-Use the mature core microphone/STT pipeline. The newer local VAD wrapper was
-causing speech-detection regressions by replacing core.listen at startup.
-Local deterministic actions remain available through the action router.
-"""
+"""Local JARVIS launcher with a persistent hands-free voice session."""
 from __future__ import annotations
 
 import inspect
 import os
+import socket
+import threading
 
 from .hardware_profile import PROFILE, apply_process_tuning
 
-# Keep CPU settings conservative without replacing core's voice pipeline.
+# Conservative CPU tuning only; never replace the voice pipeline.
 os.environ.setdefault("OMP_NUM_THREADS", str(PROFILE.whisper_threads))
 os.environ.setdefault("CT2_INTER_THREADS", "1")
 os.environ.setdefault("CT2_INTRA_THREADS", str(PROFILE.whisper_threads))
@@ -20,6 +17,7 @@ apply_process_tuning()
 from . import core  # noqa: E402
 from .intelligence import install as install_intelligence  # noqa: E402
 from .local_actions import try_execute  # noqa: E402
+from .voice_session import run as run_voice_session  # noqa: E402
 
 
 def _install_action_router() -> None:
@@ -46,18 +44,33 @@ def _install_action_router() -> None:
 
 
 def main() -> None:
-    # IMPORTANT: do not monkey-patch core.listen. Core already has Whisper STT,
-    # Google fallback, adaptive SpeechRecognition settings, Hindi detection,
-    # interruption-aware TTS, and the complete voice/tool loop.
     install_intelligence(core)
     _install_action_router()
+
+    # Preserve JARVIS background awareness and proactive behaviour without
+    # using core.main(), whose old loop reopened/calibrated the microphone on
+    # every turn.
+    try:
+        core.ensure_autostart()
+        core.update_device_presence(
+            socket.gethostname(),
+            "pc",
+            "online",
+            ["computer_control", "voice", "memory", "screen", "files"],
+        )
+        threading.Thread(target=core.awareness_watcher, daemon=True).start()
+        threading.Thread(target=core.proactive_watcher, daemon=True).start()
+        core.set_status("listening", "continuous voice ready")
+    except Exception as exc:
+        print(f"[JARVIS Background] {exc}")
+
     print(
-        f"[JARVIS Local] Stable core voice / Whisper + Google fallback / "
+        f"[JARVIS Local] Continuous voice / Whisper + Google fallback / "
         f"{PROFILE.whisper_threads} CPU threads"
     )
-    print("[JARVIS Local] Voice + local Windows action routing enabled.")
+    print("[JARVIS Local] Microphone stays open for the entire voice session.")
     print("[JARVIS Intelligence] Tool calling + selective memory + live web research enabled.")
-    core.main()
+    run_voice_session(core)
 
 
 if __name__ == "__main__":
