@@ -11,6 +11,7 @@ class IntelligenceTests(unittest.TestCase):
         '''
         parser = _SearchParser()
         parser.feed(html)
+        parser.close()
         self.assertEqual(len(parser.results), 1)
         self.assertEqual(parser.results[0]["title"], "Example result")
 

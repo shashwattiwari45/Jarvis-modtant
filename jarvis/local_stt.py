@@ -28,6 +28,12 @@ except ImportError:
 from .hardware_profile import PROFILE, whisper_kwargs
 
 _MODEL = None
+_LAST_AUDIO_DETECTED = False
+
+
+def audio_was_detected() -> bool:
+    """Return whether the most recent capture contained audio above the floor."""
+    return _LAST_AUDIO_DETECTED
 
 
 def _get_model(existing=None):
@@ -83,18 +89,26 @@ def _resolve_input_device():
 
 def _voice_threshold(noise_rms: float) -> float:
     """Choose a speech threshold that works across quiet and noisy laptops."""
-    # A hard floor avoids keyboard/fan noise being treated as speech, while
-    # the multiplier keeps normal laptop-mic speech detectable at a distance.
-    return max(180.0, min(1800.0, noise_rms * 1.65 + 90.0))
+    configured = os.getenv("JARVIS_VOICE_THRESHOLD", "").strip()
+    if configured:
+        try:
+            return max(50.0, min(500.0, float(configured)))
+        except ValueError:
+            pass
+    # Keep the threshold close to the measured noise floor so quiet speech is
+    # detected on laptop microphones without making fan noise count as speech.
+    return max(50.0, min(500.0, noise_rms * 1.15 + 5.0))
 
 
 def record_until_silence(
     sample_rate: int = 16000,
     max_seconds: float = 15.0,
-    start_timeout: float = 7.0,
-    silence_seconds: float = 0.90,
+    start_timeout: float = 10.0,
+    silence_seconds: float = 0.80,
 ):
     """Capture one utterance with adaptive VAD and first-word protection."""
+    global _LAST_AUDIO_DETECTED
+    _LAST_AUDIO_DETECTED = False
     if sd is None:
         raise RuntimeError("sounddevice is not installed. Run: pip install sounddevice")
 
@@ -154,8 +168,6 @@ def record_until_silence(
                     if len(pre_roll) > pre_roll_blocks:
                         pre_roll.pop(0)
 
-                    # Require two adjacent voiced blocks. This rejects most
-                    # clicks/keyboard transients without making wake-up slow.
                     if level >= threshold:
                         consecutive_voice += 1
                     else:
@@ -163,9 +175,11 @@ def record_until_silence(
 
                     if consecutive_voice >= 2:
                         started = True
+                        _LAST_AUDIO_DETECTED = True
                         blocks.extend(pre_roll)
-                        print("[JARVIS STT] Voice detected — transcribing...")
+                        print("[JARVIS STT] Voice detected - transcribing...")
                         last_voice_at = now
+
                 else:
                     # Slowly adapt only upward to sustained background noise;
                     # never raise the threshold while the user is speaking.
@@ -176,7 +190,7 @@ def record_until_silence(
                         break
 
                 if not started and now >= start_deadline:
-                    print("[JARVIS STT] No speech detected; retrying wake listening.")
+                    print("[JARVIS STT] No speech detected; staying ready for the next utterance.")
                     break
     except Exception as exc:
         if os.getenv("JARVIS_INPUT_DEVICE", "").strip():
@@ -208,12 +222,12 @@ def transcribe(samples: np.ndarray, sample_rate: int, model=None) -> str:
         segments, _ = active_model.transcribe(
             path,
             language=None,
-            beam_size=2,
-            best_of=2,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 450},
+            beam_size=5,
+            best_of=5,
+            vad_filter=False,
             condition_on_previous_text=False,
             temperature=0.0,
+            initial_prompt="Jarvis, wake up. Hinglish conversation in Hindi and English.",
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
     finally:

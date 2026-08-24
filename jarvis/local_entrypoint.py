@@ -22,7 +22,7 @@ apply_process_tuning()
 from . import core  # noqa: E402
 from .intelligence import install as install_intelligence  # noqa: E402
 from .local_actions import try_execute  # noqa: E402
-from .local_stt import listen as local_listen  # noqa: E402
+from .local_stt import audio_was_detected, listen as local_listen  # noqa: E402
 
 
 def _install_action_router() -> None:
@@ -61,7 +61,12 @@ def _install_action_router() -> None:
 def main() -> None:
     # Reuse core's already-loaded Whisper model when available so the local
     # runtime does not keep two large speech models in memory.
-    core.listen = lambda: local_listen(getattr(core, "_whisper_model", None))
+    def listen_with_audio_lock():
+        with core.AUDIO_LOCK:
+            return local_listen(getattr(core, "_whisper_model", None))
+
+    core.listen = listen_with_audio_lock
+    core.audio_was_detected = audio_was_detected
     install_intelligence(core)
     _install_action_router()
     print(

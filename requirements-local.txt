@@ -3,3 +3,5 @@ sounddevice>=0.5,<1
 numpy>=2,<3
 faster-whisper>=1.1,<2
 psutil>=6,<8
+edge-tts>=7,<8
+pygame>=2.6,<3
