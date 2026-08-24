@@ -1,7 +1,7 @@
-# Local Windows JARVIS runtime
-sounddevice>=0.5,<1
-numpy>=2,<3
+# Stable local Windows JARVIS runtime
 faster-whisper>=1.1,<2
 psutil>=6,<8
 edge-tts>=7,<8
 pygame>=2.6,<3
+SpeechRecognition>=3.10,<4
+PyAudio>=0.2.14,<1
