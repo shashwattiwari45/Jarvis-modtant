@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import datetime
 import html
-import re
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
@@ -29,6 +28,8 @@ class _SearchParser(HTMLParser):
         attrs = dict(attrs)
         classes = set((attrs.get("class") or "").split())
         if tag == "a" and "result__a" in classes:
+            if self._current:
+                self._finish()
             self._current = {"url": attrs.get("href", ""), "title": "", "snippet": ""}
             self._title_parts = []
             self._in_title = True
@@ -51,7 +52,10 @@ class _SearchParser(HTMLParser):
         elif self._in_snippet and tag in {"div", "span"}:
             self._current["snippet"] = " ".join("".join(self._snippet_parts).split())
             self._in_snippet = False
-        elif self._current and tag == "a" and self._current.get("title"):
+
+    def close(self):
+        super().close()
+        if self._current:
             self._finish()
 
     def _finish(self):
@@ -103,6 +107,7 @@ def web_research(query: str, max_results: int = 5) -> str:
     parser = _SearchParser()
     try:
         parser.feed(response.text)
+        parser.close()
     except Exception as exc:
         return f"Live web search parsing failed: {exc}"
 
