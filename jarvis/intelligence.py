@@ -44,11 +44,10 @@ class _SearchParser(HTMLParser):
         if self._in_title and tag == "a":
             self._current["title"] = " ".join("".join(self._title_parts).split())
             self._in_title = False
-        elif self._in_snippet and tag in {"div", "span"}:
+            return
+        if self._in_snippet and tag in {"div", "span"}:
             self._current["snippet"] = " ".join("".join(self._snippet_parts).split())
             self._in_snippet = False
-        elif self._current and tag == "a" and self._current.get("title"):
-            self._finish()
 
     def close(self):
         super().close()
@@ -182,7 +181,7 @@ def install(core) -> None:
                 "description": (
                     "Search the live web and return current source titles, snippets and URLs. "
                     "MUST use this for current/time-sensitive questions such as today's news, "
-                    "current events, live information, recent updates, prices, weather or sports. "
+                    "current events, live information, prices, weather or sports. "
                     "Do not use the browser-opening web_search tool when you need information to answer."
                 ),
                 "parameters": {
