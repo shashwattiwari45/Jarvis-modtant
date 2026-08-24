@@ -1,9 +1,4 @@
-"""JARVIS intelligence extensions: selective memory retrieval and live web research.
-
-This module is installed by the local entrypoint so the large legacy core remains
-backward-compatible. It adds one reasoning layer around the existing OpenAI
-function-calling brain instead of creating a second AI runtime.
-"""
+"""JARVIS intelligence extensions: selective memory retrieval and live web research."""
 from __future__ import annotations
 
 import datetime
@@ -52,6 +47,8 @@ class _SearchParser(HTMLParser):
         elif self._in_snippet and tag in {"div", "span"}:
             self._current["snippet"] = " ".join("".join(self._snippet_parts).split())
             self._in_snippet = False
+        elif self._current and tag == "a" and self._current.get("title"):
+            self._finish()
 
     def close(self):
         super().close()
@@ -80,12 +77,7 @@ def _clean_result_url(url: str) -> str:
 
 
 def web_research(query: str, max_results: int = 5) -> str:
-    """Retrieve current web search results for the reasoning model.
-
-    Unlike the legacy web_search tool, this does not merely open a browser. It
-    returns titles, snippets and source URLs so the LLM can reason over current
-    information before answering the user.
-    """
+    """Retrieve current web search results for the reasoning model."""
     import requests
 
     query = (query or "").strip()
@@ -242,8 +234,6 @@ def install(core) -> None:
         "search result. Prefer one useful tool call over a chain of unnecessary questions."
     )
 
-    # Keep the existing context snapshot lightweight. Persisted memory is now
-    # retrieved on demand through recall_personal_context, reducing prompt size.
     original_snapshot = core.context_snapshot
 
     def compact_context_snapshot():
