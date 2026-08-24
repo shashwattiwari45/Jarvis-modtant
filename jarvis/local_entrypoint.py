@@ -20,6 +20,7 @@ os.environ.setdefault("CT2_INTRA_THREADS", str(PROFILE.whisper_threads))
 apply_process_tuning()
 
 from . import core  # noqa: E402
+from .intelligence import install as install_intelligence  # noqa: E402
 from .local_actions import try_execute  # noqa: E402
 from .local_stt import listen as local_listen  # noqa: E402
 
@@ -61,12 +62,14 @@ def main() -> None:
     # Reuse core's already-loaded Whisper model when available so the local
     # runtime does not keep two large speech models in memory.
     core.listen = lambda: local_listen(getattr(core, "_whisper_model", None))
+    install_intelligence(core)
     _install_action_router()
     print(
         f"[JARVIS Local] {PROFILE.whisper_model} Whisper / "
         f"{PROFILE.whisper_threads} CPU threads"
     )
     print("[JARVIS Local] Voice + local Windows action routing enabled.")
+    print("[JARVIS Intelligence] Tool calling + selective memory + live web research enabled.")
     core.main()
 
 
