@@ -62,6 +62,7 @@ import uuid
 import hashlib
 import hmac
 import socket
+from pathlib import Path
 
 try:
     import speech_recognition as sr
@@ -139,7 +140,7 @@ try:
 except ImportError:
     OpenAI = None
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / "web_ui" / ".env")
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if OpenAI else None
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -155,6 +156,7 @@ VOICE_FEMALE = "en-US-AvaNeural"
 VOICE_HINDI_MALE = "hi-IN-MadhurNeural"
 VOICE_HINDI_FEMALE = "hi-IN-SwaraNeural"
 CURRENT_VOICE_MODE = "nova"
+SPEAK_LANGUAGE = os.getenv("JARVIS_SPEAK_LANGUAGE", "hi").strip().lower()
 DICTATION_MODE = False
 DICTATION_START_PHRASES = ["start dictation", "start typing", "dictation mode on"]
 DICTATION_STOP_PHRASES = ["stop dictation", "stop typing", "dictation mode off"]
@@ -357,8 +359,16 @@ def _split_by_script(text: str):
     return runs
 
 
+def _clean_spoken_text(text: str) -> str:
+    """Remove visual-only symbols and URLs before sending text to speech."""
+    text = re.sub(r"https?://\S+|www\.\S+", " the website ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|ai|co|in|dev|app)\b", " the website ", text, flags=re.IGNORECASE)
+    text = re.sub(r"[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 async def _play_segment(text: str, is_hindi: bool):
-    if is_hindi:
+    if SPEAK_LANGUAGE == "hi" or is_hindi:
         voice = VOICE_HINDI_FEMALE if CURRENT_VOICE_MODE == "female" else VOICE_HINDI_MALE
     else:
         voice = VOICE_FEMALE if CURRENT_VOICE_MODE == "female" else VOICE_NOVA
@@ -388,6 +398,9 @@ async def _play_segment(text: str, is_hindi: bool):
 
 
 def speak(text: str, force: bool = False):
+    text = _clean_spoken_text(str(text))
+    if not text:
+        return
     print(f"Jarvis: {text}")
     if JARVIS_CONFIG.get("quiet_mode") and not force:
         return
@@ -545,7 +558,7 @@ DEFAULT_CONFIG = {
     "background_mode": True,
     "quiet_mode": False,
     "proactive_enabled": True,
-    "proactive_frequency": "balanced",
+    "proactive_frequency": "high",
     "voice_personality": "warm futuristic",
     "preferred_name": "boss",
     "awareness_poll_seconds": 20,
@@ -2065,9 +2078,8 @@ def change_instagram_bio(new_bio: str, confirmed: bool = False) -> str:
 # NOVA'S BRAIN: tool-calling dispatch
 # ---------------------------------------------------------------------------
 NOVA_SYSTEM_PROMPT = """You are Jarvis, a witty, warm personal voice assistant running on the
-user's Windows laptop. Reply in the SAME language/style the user used - natural casual
-English for English, natural Hinglish (Hindi mixed with English, Devanagari script for the
-Hindi parts) if they mixed languages, proper Hindi if they spoke Hindi.
+user's Windows laptop. Reply primarily in natural conversational Hindi. Use Hinglish when the
+user mixes Hindi and English, and retain unavoidable product names in English.
 
 Keep spoken replies SHORT: 1-3 sentences, warm and a little playful - this is text-to-speech,
 not a document. You have TOOLS to actually control the user's computer. Use them whenever the
@@ -2440,12 +2452,13 @@ def think_and_act(user_text: str) -> str:
 # MAIN LOOP
 # ---------------------------------------------------------------------------
 WAKE_WORDS = ["jarvis", "जार्विस", "jervis", "jarves"]
-WAKE_PHRASES = ["wake up jarvis", "jarvis wake up", "wake up", "jarvis utho", "जार्विस उठो"]
-SILENT_ROUNDS_BEFORE_SLEEP = 4
-ACTIVE_CONVERSATION_SECONDS = 45
+WAKE_PHRASES = ["wake up jarvis", "wakeup jarvis", "jarvis wake up", "wake up", "wakeup", "wake-up", "jarvis utho", "जार्विस उठो"]
+SLEEP_AFTER_SECONDS = 120
 
 def extract_wake_command(text: str):
     lowered = (text or "").lower().strip()
+    if lowered in WAKE_PHRASES:
+        return ""
     for word in WAKE_WORDS:
         if lowered == word or lowered.startswith(word + " ") or (word in lowered and any(p in lowered for p in WAKE_PHRASES)):
             return lowered.replace(word, "", 1).strip(" ,:-")
@@ -2476,11 +2489,20 @@ def check_morning_greeting():
         speak("Morning. I'm running quietly in the background if you need anything.")
         _mark_said_today("morning")
 
-PROACTIVE_CHECKS = [check_battery_proactive, check_morning_greeting]
+def check_unfinished_task_proactive():
+    if not JARVIS_CONFIG.get("proactive_enabled", True) or JARVIS_CONFIG.get("quiet_mode"):
+        return
+    task = SESSION_MEMORY.get("current_task", "")
+    if task and awareness_snapshot().get("idle_seconds", 0) >= 300 and not _already_said_today("task_reminder"):
+        speak(f"Boss, you have an unfinished task: {task}", force=True)
+        _mark_said_today("task_reminder")
+
+PROACTIVE_CHECKS = [check_battery_proactive, check_morning_greeting, check_unfinished_task_proactive]
 
 def proactive_watcher():
+    intervals = {"high": 30, "balanced": 90, "low": 180}
     while True:
-        time.sleep(120)  # check every 2 min - frequent enough to matter, not nagging
+        time.sleep(intervals.get(JARVIS_CONFIG.get("proactive_frequency"), 90))
         if AUDIO_LOCK.locked():
             continue  # you're mid-conversation, don't interrupt
         for check in PROACTIVE_CHECKS:
@@ -2501,37 +2523,33 @@ def main():
     else:
         speak(f"Hi boss! {briefing} Jarvis online - just talk to me normally.")
 
-    asleep = True
-    last_active_at = 0
-    silent_rounds = 0
+    asleep = False
+    last_active_at = time.time()
     threading.Thread(target=proactive_watcher, daemon=True).start()
     while True:
         text = listen()
 
+        audio_detected = globals().get("audio_was_detected", lambda: bool(text))()
         if not text:
-            silent_rounds += 1
-            if not asleep and (silent_rounds >= SILENT_ROUNDS_BEFORE_SLEEP or time.time() - last_active_at > ACTIVE_CONVERSATION_SECONDS):
+            if audio_detected and not asleep:
+                last_active_at = time.time()
+            if not asleep and time.time() - last_active_at >= SLEEP_AFTER_SECONDS:
                 asleep = True
                 set_status("sleeping", "say Jarvis")
                 if not JARVIS_CONFIG.get("quiet_mode"):
-                    speak("Going quiet. Say Jarvis when you need me.")
-            continue
-
-        silent_rounds = 0
-
-        wake_command = extract_wake_command(text)
-        if asleep:
-            if wake_command is not None:
+                    speak("Going quiet. I will wake when I hear you.", force=True)
+            elif asleep and audio_detected:
                 asleep = False
                 last_active_at = time.time()
                 set_status("listening")
-                if wake_command:
-                    text = wake_command
-                else:
-                    speak("At your service.")
-                    continue
-            else:
-                continue
+                speak("Anything, boss?", force=True)
+            continue
+
+        if asleep:
+            asleep = False
+            last_active_at = time.time()
+            set_status("listening")
+            speak("Anything, boss?", force=True)
         else:
             last_active_at = time.time()
 
@@ -2578,7 +2596,7 @@ def main():
         set_status("thinking")
         reply = think_and_act(text)
         set_status("success" if not reply.lower().startswith(("sorry", "i hit", "that action failed")) else "failure")
-        speak(reply)
+        speak(reply, force=True)
 
 
 if __name__ == "__main__":
