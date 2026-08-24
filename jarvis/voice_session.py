@@ -39,6 +39,7 @@ class ContinuousVoiceSession:
         self.dictation_mode = dictation_mode
         self.speaking = threading.Event()
         self._last_audio_at = time.monotonic()
+        self._original_speak = None
 
     def configure_microphone(self) -> None:
         recognizer = self.core.recognizer
@@ -51,8 +52,9 @@ class ContinuousVoiceSession:
         recognizer.operation_timeout = None
 
     def _callback(self, recognizer, audio) -> None:
-        # The microphone remains open continuously. During JARVIS speech we
-        # discard captured audio so the speaker's own TTS cannot become a command.
+        # The microphone remains open continuously. During any JARVIS speech,
+        # including proactive speech, discard captured audio so TTS cannot loop
+        # back into the command processor.
         if self.speaking.is_set():
             return
         try:
@@ -67,6 +69,34 @@ class ContinuousVoiceSession:
                 self.queue.put_nowait(audio)
             except queue.Full:
                 pass
+
+    def _install_speech_guard(self) -> None:
+        self._original_speak = self.core.speak
+        session = self
+        original = self._original_speak
+
+        def guarded_speak(text, force=False):
+            session.speaking.set()
+            try:
+                return original(text, force=force)
+            finally:
+                session.speaking.clear()
+                session._flush_queue()
+
+        guarded_speak._jarvis_continuous_voice_guard = True
+        self.core.speak = guarded_speak
+
+    def _restore_speech_guard(self) -> None:
+        if self._original_speak is not None:
+            self.core.speak = self._original_speak
+            self._original_speak = None
+
+    def _flush_queue(self) -> None:
+        while True:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
 
     def start(self) -> None:
         if not sr or not self.core.recognizer:
@@ -83,6 +113,7 @@ class ContinuousVoiceSession:
             )
             print(f"[JARVIS Voice] Energy threshold: {self.core.recognizer.energy_threshold:.0f}")
 
+        self._install_speech_guard()
         self.stop_background = self.core.recognizer.listen_in_background(
             self.source,
             self._callback,
@@ -98,11 +129,8 @@ class ContinuousVoiceSession:
             except Exception:
                 pass
             self.stop_background = None
-        while True:
-            try:
-                self.queue.get_nowait()
-            except queue.Empty:
-                break
+        self._restore_speech_guard()
+        self._flush_queue()
 
     def _transcribe(self, audio) -> str:
         if getattr(self.core, "_whisper_model", None):
@@ -110,17 +138,8 @@ class ContinuousVoiceSession:
         return self.core._listen_with_google(audio)
 
     def _speak(self, text: str, force: bool = True) -> None:
-        self.speaking.set()
-        try:
-            self.core.speak(text, force=force)
-        finally:
-            self.speaking.clear()
-            # Drop anything captured during the response before the next turn.
-            while True:
-                try:
-                    self.queue.get_nowait()
-                except queue.Empty:
-                    break
+        self.core.speak(text, force=force)
+        # guarded_speak flushes any audio captured while the response played.
 
     def _wake_match(self, text: str) -> bool:
         return any(p.search(text) for p in WAKE_PHRASES)
