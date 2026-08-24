@@ -133,13 +133,13 @@ import tkinter as tk
 try:
     from dotenv import load_dotenv
 except ImportError:
-    load_dotenv = lambda: None
+    load_dotenv = lambda *args, **kwargs: None
 try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "web_ui", ".env"))
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if OpenAI else None
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -198,6 +198,11 @@ APP_SEARCH_DIRS = [
     r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
     os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
 ]
+APP_IGNORE_TERMS = {
+    "update", "updater", "uninstall", "installer", "install", "setup",
+    "developer", "development", "sdk", "ide", "visual studio", "android studio",
+    "pycharm", "intellij", "eclipse", "codeblocks", "package manager",
+}
 APP_INDEX_REFRESH_SECONDS = 300
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -427,11 +432,11 @@ def speak(text: str, force: bool = False):
 # ---------------------------------------------------------------------------
 recognizer = sr.Recognizer() if sr else None
 if recognizer:
-    recognizer.pause_threshold = 0.7
-    recognizer.non_speaking_duration = 0.4
+    recognizer.pause_threshold = 0.85
+    recognizer.non_speaking_duration = 0.25
     recognizer.dynamic_energy_threshold = True
-    recognizer.dynamic_energy_adjustment_damping = 0.15
-    recognizer.dynamic_energy_ratio = 1.5
+    recognizer.dynamic_energy_adjustment_damping = 0.05
+    recognizer.dynamic_energy_ratio = 1.15
 
 
 def listen() -> str:
@@ -441,7 +446,7 @@ def listen() -> str:
         time.sleep(1)
         return ""
     with AUDIO_LOCK, sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source, duration=0.4)
+        recognizer.adjust_for_ambient_noise(source, duration=0.6)
         print("Listening... (speak now)")
         try:
             audio = recognizer.listen(source, timeout=6, phrase_time_limit=14)
@@ -695,8 +700,18 @@ def build_app_index() -> dict:
             continue
         for path in glob.glob(os.path.join(base_dir, "**", "*.lnk"), recursive=True):
             name = os.path.splitext(os.path.basename(path))[0].strip().lower()
+            if any(term in name for term in APP_IGNORE_TERMS):
+                continue
             index[name] = path
     return index
+
+
+def list_useful_apps() -> str:
+    """List launchable user apps while excluding developer/update utilities."""
+    apps = sorted(get_app_index())
+    if not apps:
+        return "I couldn't find any useful installed apps in the Start Menu."
+    return "Useful installed apps: " + ", ".join(apps[:60])
 
 
 def get_app_index() -> dict:
@@ -829,8 +844,25 @@ def open_website(site: str) -> str:
 
 
 def play_youtube(query: str) -> str:
-    webbrowser.open(f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}")
-    return f"Opened YouTube search results for '{query}'."
+    if not pyautogui:
+        return "The 'pyautogui' package is needed for in-tab YouTube control."
+    open_application("chrome")
+    time.sleep(1.2)
+    pyautogui.hotkey("ctrl", "l")
+    pyautogui.write(
+        f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}",
+        interval=0.002,
+    )
+    pyautogui.press("enter")
+    return f"Searched YouTube in the current Chrome tab for '{query}'."
+
+
+def click_youtube_video(title: str) -> str:
+    """Click a visible YouTube video title without opening another window."""
+    if not pyautogui:
+        return "The 'pyautogui' package is needed for YouTube clicking."
+    time.sleep(1.0)
+    return click_on_text(title)
 
 
 def take_screenshot() -> str:
@@ -1833,6 +1865,7 @@ INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
 INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID", "")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+PENDING_WHATSAPP_DRAFT = None
 SOCIAL_STRATEGY_MODEL = os.getenv("JARVIS_SOCIAL_MODEL", OPENAI_MODEL)
 SOCIAL_MODERATION_KEYWORDS = {
     "spam": ["free followers", "crypto giveaway", "investment guaranteed", "click this link", "dm to earn"],
@@ -2055,6 +2088,47 @@ def send_whatsapp_message(to_number: str, message: str, confirmed: bool = False)
     except Exception as e:
         return f"WhatsApp send failed: {e}"
 
+
+def draft_whatsapp_web_message(contact: str, message: str) -> str:
+    """Open WhatsApp Web, select a visible contact, and type an unsent draft."""
+    global PENDING_WHATSAPP_DRAFT
+    if not pyautogui:
+        return "The pyautogui package is required for WhatsApp Web drafting."
+    if not contact.strip() or not message.strip():
+        return "Please provide both a WhatsApp contact and message."
+    open_website("whatsapp")
+    time.sleep(3)
+    if "couldn't find" in click_on_text("Search").lower():
+        return "I opened WhatsApp Web, but couldn't find its contact search box."
+    type_text(contact)
+    time.sleep(2)
+    if "couldn't find" in click_on_text(contact).lower():
+        return f"I couldn't find the WhatsApp contact '{contact}'."
+    time.sleep(1)
+    message_box = click_on_text("Type a message")
+    if message_box.startswith("Couldn't"):
+        message_box = click_on_text("message")
+    if message_box.startswith("Couldn't"):
+        return f"I found {contact}, but couldn't find the message box."
+    type_text(message)
+    PENDING_WHATSAPP_DRAFT = {"contact": contact, "message": message}
+    return f"Draft typed to {contact}: {message}. I have not sent it. Say confirm to send."
+
+
+def confirm_whatsapp_web_message() -> str:
+    """Send the prepared WhatsApp Web draft after explicit confirmation."""
+    global PENDING_WHATSAPP_DRAFT
+    if not PENDING_WHATSAPP_DRAFT:
+        return "There is no pending WhatsApp draft to send."
+    if not pyautogui:
+        return "The pyautogui package is required to send the WhatsApp draft."
+    result = click_on_text("Send")
+    if result.startswith("Couldn't"):
+        return "I could not find the Send button, so the draft remains unsent."
+    contact = PENDING_WHATSAPP_DRAFT["contact"]
+    PENDING_WHATSAPP_DRAFT = None
+    return f"WhatsApp message sent to {contact}."
+
 def change_instagram_bio(new_bio: str, confirmed: bool = False) -> str:
     if not confirmed or JARVIS_CONFIG.get("social_agent", {}).get("require_approval_for_bio", True):
         social_audit("instagram_bio_approval_required", {"bio_preview": new_bio[:120]})
@@ -2092,11 +2166,19 @@ You have a persistent personal memory/profile and should sound personalized, not
 You receive a compact local CONTEXT snapshot on each turn. Use it to resolve "this", "that",
 "the second one", visible screen references, clipboard references, and recent-task follow-ups.
 For screen/UI work, prefer OCR/layout and keyboard shortcuts first; use vision only when OCR is
-insufficient. Never send messages, spend money, delete data, call people, change credentials/settings, mass-message, delete content, or perform sensitive actions without explicit user confirmation. For Instagram/WhatsApp, use official Meta APIs only, never claim access to private ranking algorithms, never pretend to be human, and treat collab requests as notify-the-user events."""
+insufficient. For a request to message a WhatsApp contact by name, use draft_whatsapp_web_message
+to open WhatsApp Web, find the contact, type the unsent draft, and read it aloud. Never send it
+until the user explicitly confirms; then use confirm_whatsapp_web_message. Never send messages,
+spend money, delete data, call people, change credentials/settings, mass-message, or delete
+content without explicit user confirmation. For Instagram/WhatsApp API automation, use official
+Meta APIs only, never claim access to private ranking algorithms, never pretend to be human, and
+treat collab requests as notify-the-user events."""
 
 TOOLS = [
     {"type": "function", "function": {"name": "open_application", "description": "Open an installed desktop app by name (Chrome, Notepad, or anything found in the Start Menu).",
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "list_useful_apps", "description": "List useful installed user apps, excluding IDEs, SDKs, installers, and update utilities.",
+        "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "close_application", "description": "Close/kill a running desktop app by name.",
         "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
     {"type": "function", "function": {"name": "open_website", "description": "Open a website in the default browser, by name (e.g. youtube, whatsapp) or domain.",
@@ -2105,6 +2187,8 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "play_youtube", "description": "Search YouTube for a video/song and open results.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "click_youtube_video", "description": "Click a visible YouTube video title in the current Chrome tab without opening a new window.",
+        "parameters": {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}}},
     {"type": "function", "function": {"name": "take_screenshot", "description": "Take and save a screenshot.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "type_text", "description": "Type text into whatever window currently has focus (e.g. a Notepad doc or a browser search box).",
         "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}},
@@ -2219,6 +2303,8 @@ TOOLS = [
     {"type": "function", "function": {"name": "show_social_history", "description": "Show recent Instagram posts/drafts stored by Jarvis.", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}}},
     {"type": "function", "function": {"name": "generate_social_reply", "description": "Draft a safe Instagram/WhatsApp DM/comment reply with spam/toxic/unsafe filtering.", "parameters": {"type": "object", "properties": {"platform": {"type": "string"}, "incoming_text": {"type": "string"}, "sender": {"type": "string"}}, "required": ["platform", "incoming_text"]}}},
     {"type": "function", "function": {"name": "send_whatsapp_message", "description": "Send a WhatsApp message using the official WhatsApp Cloud API only after confirmation or autonomous reply mode.", "parameters": {"type": "object", "properties": {"to_number": {"type": "string"}, "message": {"type": "string"}, "confirmed": {"type": "boolean"}}, "required": ["to_number", "message"]}}},
+    {"type": "function", "function": {"name": "draft_whatsapp_web_message", "description": "Open WhatsApp Web in the current browser, find a visible contact, type an unsent message, and read the draft aloud. Never send it.", "parameters": {"type": "object", "properties": {"contact": {"type": "string"}, "message": {"type": "string"}}, "required": ["contact", "message"]}}},
+    {"type": "function", "function": {"name": "confirm_whatsapp_web_message", "description": "Send the pending WhatsApp Web draft only when the user explicitly says confirm, yes send it, or send it now.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {"name": "change_instagram_bio", "description": "Prepare a trend/audience based bio update; requires explicit approval and never changes credentials/settings.", "parameters": {"type": "object", "properties": {"new_bio": {"type": "string"}, "confirmed": {"type": "boolean"}}, "required": ["new_bio"]}}},
 
 ]
@@ -2227,9 +2313,10 @@ TOOLS = [
 # confirmation directly, skipping the second GPT round-trip entirely (saves
 # tokens on the common case - opening an app doesn't need an AI-written summary).
 SIMPLE_ACTION_TOOLS = {
-    "open_application", "close_application", "control_zoom", "control_chrome",
+    "open_application", "list_useful_apps", "close_application", "control_zoom", "control_chrome",
     "control_volume", "control_media", "take_screenshot", "switch_voice",
-    "get_time", "web_search", "open_website", "play_youtube", "call_person",
+    "get_time", "web_search", "open_website", "play_youtube", "click_youtube_video", "call_person",
+    "draft_whatsapp_web_message", "confirm_whatsapp_web_message",
     "join_meeting", "system_status", "type_text", "open_paint",
     "draw_circle_paint", "draw_rectangle_paint", "draw_line_paint", "draw_scenery_paint", "control_brightness" ,
     "get_weather", "fill_area", "draw_freehand", "add_text_paint",
@@ -2239,10 +2326,12 @@ SIMPLE_ACTION_TOOLS = {
 
 TOOL_FUNCTIONS = {
     "open_application": lambda a: open_application(a.get("name", "")),
+    "list_useful_apps": lambda a: list_useful_apps(),
     "close_application": lambda a: close_app_by_name(a.get("name", "")),
     "open_website": lambda a: open_website(a.get("site", "")),
     "web_search": lambda a: web_search(a.get("query", "")),
     "play_youtube": lambda a: play_youtube(a.get("query", "")),
+    "click_youtube_video": lambda a: click_youtube_video(a.get("title", "")),
     "take_screenshot": lambda a: take_screenshot(),
     "type_text": lambda a: type_text(a.get("text", "")),
     "get_time": lambda a: get_time(),
@@ -2300,6 +2389,8 @@ TOOL_FUNCTIONS = {
     "show_social_history": lambda a: show_social_history(a.get("limit", 10)),
     "generate_social_reply": lambda a: generate_social_reply(a.get("platform", "instagram"), a.get("incoming_text", ""), a.get("sender", "")),
     "send_whatsapp_message": lambda a: send_whatsapp_message(a.get("to_number", ""), a.get("message", ""), a.get("confirmed", False)),
+    "draft_whatsapp_web_message": lambda a: draft_whatsapp_web_message(a.get("contact", ""), a.get("message", "")),
+    "confirm_whatsapp_web_message": lambda a: confirm_whatsapp_web_message(),
     "change_instagram_bio": lambda a: change_instagram_bio(a.get("new_bio", ""), a.get("confirmed", False)),
 }
 

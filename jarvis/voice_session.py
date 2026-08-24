@@ -9,8 +9,16 @@ from __future__ import annotations
 
 import queue
 import re
+import os
 import threading
 import time
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / "web_ui" / ".env")
+except ImportError:
+    pass
 
 try:
     import speech_recognition as sr
@@ -103,7 +111,9 @@ class ContinuousVoiceSession:
             raise RuntimeError("SpeechRecognition/PyAudio is required for continuous voice mode.")
 
         self.configure_microphone()
-        self.source = sr.Microphone()
+        configured_device = os.getenv("JARVIS_INPUT_DEVICE", "").strip()
+        device_index = int(configured_device) if configured_device.isdigit() else None
+        self.source = sr.Microphone(device_index=device_index)
         with self.source as source:
             print("[JARVIS Voice] Calibrating microphone once...")
             self.core.recognizer.adjust_for_ambient_noise(source, duration=0.8)
@@ -111,6 +121,7 @@ class ContinuousVoiceSession:
                 "[JARVIS Voice] Continuous microphone active. "
                 "Speak naturally; no repeated mic startup."
             )
+            print(f"[JARVIS Voice] Input device: {source} (index={device_index or 'default'})")
             print(f"[JARVIS Voice] Energy threshold: {self.core.recognizer.energy_threshold:.0f}")
 
         self._install_speech_guard()
@@ -155,7 +166,8 @@ class ContinuousVoiceSession:
             try:
                 self.core.save_memory()
             finally:
-                return False
+                pass
+            return False
 
         if self.asleep:
             if self._wake_match(text):

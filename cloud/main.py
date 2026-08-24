@@ -10,26 +10,20 @@ from typing import Optional
 
 import psycopg
 from fastapi import FastAPI, Header, HTTPException
-from openai import OpenAI
 from pydantic import BaseModel, Field
+
+from model_provider import ProviderError, generate_json
 
 APP_NAME = "Jarvis Cloud"
 DB_PATH = Path(os.getenv("JARVIS_CLOUD_DB", "./jarvis_cloud.db"))
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DEVICE_SECRET = os.getenv("JARVIS_CLOUD_SECRET", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-FAST_MODEL = os.getenv("JARVIS_FAST_MODEL", "gpt-5.4-nano")
-REASONING_MODEL = os.getenv("JARVIS_REASONING_MODEL", "gpt-5.4-mini")
-DEFAULT_MODEL = os.getenv("JARVIS_CLOUD_MODEL", REASONING_MODEL)
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", os.getenv("JARVIS_CLOUD_MODEL", "gemini-2.5-flash"))
 WEB_SEARCH_SIZE = os.getenv("JARVIS_WEB_SEARCH_CONTEXT", "medium")
 OWNER_SCOPE = os.getenv("JARVIS_OWNER_ID", "owner")
 
 if not DEVICE_SECRET:
     raise RuntimeError("JARVIS_CLOUD_SECRET is required")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is required")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
 app = FastAPI(title=APP_NAME)
 
 
@@ -145,17 +139,8 @@ def needs_web_search(message: str) -> bool:
     return any(re.search(pattern, text) for pattern in patterns)
 
 
-def choose_model(message: str, web: bool) -> str:
-    words = re.findall(r"\b\w+\b", message)
-    simple = len(words) <= 6 and not web and not any(
-        term in message.lower() for term in ("debug", "explain", "compare", "plan", "why", "how", "remember")
-    )
-    return FAST_MODEL if simple else (REASONING_MODEL or DEFAULT_MODEL)
-
-
 def cloud_brain(message: str, memories: dict) -> dict:
     web = needs_web_search(message)
-    model = choose_model(message, web)
     system = (
         "You are Jarvis, a capable private personal AI for the user's phone and PC. "
         "Return ONLY valid JSON with keys mode, reply, and memory_updates. mode must be exactly 'chat' or 'pc_action'. "
@@ -178,21 +163,9 @@ def cloud_brain(message: str, memories: dict) -> dict:
         f"USER:\n{message}"
     )
 
-    request_kwargs = {
-        "model": model,
-        "instructions": system,
-        "input": prompt,
-        "verbosity": "medium",
-    }
-    if model != FAST_MODEL:
-        request_kwargs["reasoning_effort"] = "medium"
-    if web:
-        request_kwargs["tools"] = [{"type": "web_search", "search_context_size": WEB_SEARCH_SIZE}]
-
-    response = client.responses.create(**request_kwargs)
-    raw = (response.output_text or "").strip()
+    parsed, model, used_web = generate_json(system, prompt, web=web)
+    raw = json.dumps(parsed, ensure_ascii=False)
     try:
-        parsed = json.loads(raw)
         if parsed.get("mode") not in {"chat", "pc_action"}:
             raise ValueError("invalid mode")
         updates = parsed.get("memory_updates", [])
@@ -203,15 +176,15 @@ def cloud_brain(message: str, memories: dict) -> dict:
             "reply": str(parsed.get("reply", "")),
             "memory_updates": updates[:5],
             "model": model,
-            "web_search": web,
+            "web_search": used_web,
         }
     except Exception:
         return {
             "mode": "chat",
-            "reply": raw or "I'm here, boss.",
+            "reply": str(parsed.get("reply", "")) or raw or "I'm here, boss.",
             "memory_updates": [],
             "model": model,
-            "web_search": web,
+            "web_search": used_web,
         }
 
 

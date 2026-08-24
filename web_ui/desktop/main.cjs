@@ -3,6 +3,7 @@ const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
+const net = require("net");
 
 const DEV_MODE = process.argv.includes("--dev") || !app.isPackaged;
 const PORT = Number(process.env.JARVIS_UI_PORT || 3000);
@@ -57,6 +58,7 @@ function spawnProcess(command, args, options, label) {
 }
 
 function startPythonBackend() {
+  if (process.env.JARVIS_HUD_CHILD === "1") return;
   pythonProcess = spawnProcess(
     pythonCommand,
     ["-m", "jarvis.local_entrypoint"],
@@ -65,7 +67,20 @@ function startPythonBackend() {
   );
 }
 
-function startWebServer() {
+function portIsOpen(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => resolve(false));
+    socket.setTimeout(500, () => { socket.destroy(); resolve(false); });
+  });
+}
+
+async function startWebServer() {
+  if (await portIsOpen(PORT)) {
+    console.log(`[JARVIS-HUD] Reusing existing server on port ${PORT}.`);
+    return;
+  }
   if (DEV_MODE) {
     uiProcess = spawnProcess(
       "npm",
@@ -168,7 +183,7 @@ async function boot() {
   // Render/cloud is deliberately NOT owned by this process. Closing the
   // desktop app or shutting down Windows therefore does not stop cloud work.
   startPythonBackend();
-  startWebServer();
+  await startWebServer();
 
   await waitForHttp(`http://127.0.0.1:${PORT}`);
   createWindow();

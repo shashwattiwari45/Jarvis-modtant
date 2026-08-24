@@ -5,7 +5,7 @@ This is the always-online cloud layer for Jarvis. It keeps the shared AI brain, 
 ## What it does
 
 - FastAPI gateway for phone/PC clients
-- GPT-5-mini cloud conversation
+- Gemini cloud conversation with OpenAI fallback
 - Shared lightweight memory
 - Device heartbeat/presence
 - Authenticated requests using `JARVIS_CLOUD_SECRET`
@@ -24,7 +24,7 @@ This repository includes `render.yaml`. Render can deploy a FastAPI service dire
 3. The root directory is `cloud`.
 4. Build: `pip install -r requirements.txt`
 5. Start: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-6. Set `OPENAI_API_KEY` and a long random `JARVIS_CLOUD_SECRET` in Render's environment settings.
+6. Set `GEMINI_API_KEY`, `JARVIS_TEXT_PROVIDER=gemini`, `GEMINI_MODEL=gemini-2.5-flash`, and a long random `JARVIS_CLOUD_SECRET` in Render's environment settings. Keep `OPENAI_API_KEY` configured if you want automatic text fallback or OpenAI image generation.
 7. After deployment, test `/health`.
 8. Put the deployed HTTPS URL into the PC/Android clients as `JARVIS_CLOUD_URL`.
 

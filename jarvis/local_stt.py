@@ -12,8 +12,15 @@ import os
 import tempfile
 import time
 import wave
+from pathlib import Path
 
 import numpy as np
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / "web_ui" / ".env")
+except ImportError:
+    pass
 
 try:
     import sounddevice as sd

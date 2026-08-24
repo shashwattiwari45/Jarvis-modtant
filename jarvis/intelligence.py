@@ -22,13 +22,13 @@ class _SearchParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         classes = set((attrs.get("class") or "").split())
-        if tag == "a" and "result__a" in classes:
+        if tag == "a" and ("result__a" in classes or "result-link" in classes):
             if self._current:
                 self._finish()
             self._current = {"url": attrs.get("href", ""), "title": "", "snippet": ""}
             self._title_parts = []
             self._in_title = True
-        elif self._current and tag in {"a", "div", "span"} and "result__snippet" in classes:
+        elif self._current and tag in {"a", "div", "span"} and ("result__snippet" in classes or "result-snippet" in classes):
             self._in_snippet = True
             self._snippet_parts = []
 
@@ -61,6 +61,41 @@ class _SearchParser(HTMLParser):
             self.results.append(result)
 
 
+class _GoogleSearchParser(HTMLParser):
+    """Extract public Google result links and titles from HTML search pages."""
+
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self._href = ""
+        self._title_parts = []
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        href = attrs.get("href", "")
+        if tag == "a" and href.startswith("http"):
+            self._href = href
+        elif tag == "a" and href.startswith("/url?"):
+            self._href = parse_qs(urlparse(href).query).get("q", [""])[0]
+        elif tag == "h3" and self._href:
+            self._title_parts = []
+            self._in_title = True
+
+    def handle_data(self, data):
+        if self._in_title:
+            self._title_parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "h3" and self._in_title:
+            title = " ".join("".join(self._title_parts).split())
+            if title and self._href:
+                self.results.append({"url": self._href, "title": title, "snippet": ""})
+            self._href = ""
+            self._title_parts = []
+            self._in_title = False
+
+
 def _clean_result_url(url: str) -> str:
     """Unwrap common DuckDuckGo redirect URLs."""
     if url.startswith("//"):
@@ -84,18 +119,30 @@ def web_research(query: str, max_results: int = 5) -> str:
         return "No web-search query was supplied."
     max_results = max(1, min(int(max_results or 5), 8))
 
-    url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query})
+    urls = [
+        "https://html.duckduckgo.com/html/?" + urlencode({"q": query}),
+        "https://lite.duckduckgo.com/lite/?" + urlencode({"q": query}),
+        "https://www.google.com/search?" + urlencode({"q": query, "num": max_results}),
+    ]
+    response = None
     try:
-        response = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Jarvis/1.0"},
-            timeout=8,
-        )
-        response.raise_for_status()
+        for url in urls:
+            candidate = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Jarvis/1.0"},
+                timeout=8,
+            )
+            has_duck_results = "result__a" in candidate.text or "result-link" in candidate.text
+            is_google = "google.com/search" in url
+            if candidate.status_code == 200 and (has_duck_results or is_google):
+                response = candidate
+                break
+        if response is None:
+            return "Live web search returned no usable results."
     except Exception as exc:
         return f"Live web search failed: {exc}"
 
-    parser = _SearchParser()
+    parser = _GoogleSearchParser() if "google.com/search" in response.url else _SearchParser()
     try:
         parser.feed(response.text)
         parser.close()

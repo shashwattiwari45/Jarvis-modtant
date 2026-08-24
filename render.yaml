@@ -11,6 +11,12 @@ services:
         value: 3.11.9
       - key: OPENAI_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: JARVIS_TEXT_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
       - key: JARVIS_CLOUD_SECRET
         sync: false
       - key: JARVIS_CLOUD_MODEL
