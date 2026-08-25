@@ -1,14 +1,11 @@
-"""Local microphone STT for JARVIS.
-
-Uses sounddevice for capture and faster-whisper for offline transcription.
-It avoids the SpeechRecognition/PyAudio dependency for the primary local path.
-"""
+"""Low-latency local microphone STT for JARVIS."""
 from __future__ import annotations
 
 import os
 import time
 import wave
 import tempfile
+from typing import Optional
 
 import numpy as np
 
@@ -36,65 +33,115 @@ def _get_model(existing=None):
     return _MODEL
 
 
-def _rms(samples: np.ndarray) -> float:
+def rms(samples: np.ndarray) -> float:
     if samples.size == 0:
         return 0.0
     x = samples.astype(np.float32)
     return float(np.sqrt(np.mean(x * x)))
 
 
+def get_input_device():
+    if sd is None:
+        return None
+    value = os.getenv("JARVIS_INPUT_DEVICE", "").strip()
+    if value:
+        try:
+            return int(value)
+        except ValueError:
+            wanted = value.casefold()
+            for index, info in enumerate(sd.query_devices()):
+                if int(info.get("max_input_channels", 0)) > 0 and wanted in str(info.get("name", "")).casefold():
+                    return index
+            raise RuntimeError(f"Microphone '{value}' was not found.")
+    default = sd.default.device[0]
+    return int(default) if default is not None and int(default) >= 0 else None
+
+
+def get_input_sample_rate(device: Optional[int] = None) -> int:
+    if sd is None:
+        return 16000
+    try:
+        info = sd.query_devices(device, "input")
+        return int(round(float(info.get("default_samplerate", 16000))))
+    except Exception:
+        return 16000
+
+
 def record_until_silence(
-    sample_rate: int = 16000,
+    sample_rate: Optional[int] = None,
     max_seconds: float = 10.0,
     start_timeout: float = 5.0,
     silence_seconds: float = 0.85,
 ):
+    """Capture one utterance using the microphone's native rate."""
     if sd is None:
         raise RuntimeError("sounddevice is not installed.")
 
+    device = get_input_device()
+    if device is None:
+        raise RuntimeError("No input microphone is configured.")
+    rate = int(sample_rate or get_input_sample_rate(device))
+
     block_seconds = 0.1
-    block_size = int(sample_rate * block_seconds)
+    block_size = int(rate * block_seconds)
     calibration_blocks = max(1, int(0.5 / block_seconds))
     blocks = []
     noise_samples = []
 
-    with sd.InputStream(
-        samplerate=sample_rate,
-        channels=1,
-        dtype="int16",
-        blocksize=block_size,
-    ) as stream:
-        for _ in range(calibration_blocks):
-            data, _ = stream.read(block_size)
-            noise_samples.append(data[:, 0].copy())
+    try:
+        with sd.InputStream(
+            samplerate=rate,
+            channels=1,
+            dtype="int16",
+            blocksize=block_size,
+            device=device,
+            latency="low",
+        ) as stream:
+            for _ in range(calibration_blocks):
+                data, _ = stream.read(block_size)
+                noise_samples.append(data[:, 0].copy())
 
-        noise = _rms(np.concatenate(noise_samples))
-        threshold = max(350.0, noise * 2.2)
-        started = False
-        last_voice_at = time.monotonic()
-        deadline = time.monotonic() + max_seconds
-        start_deadline = time.monotonic() + start_timeout
+            noise = rms(np.concatenate(noise_samples))
+            threshold = max(350.0, noise * 2.2)
+            started = False
+            last_voice_at = time.monotonic()
+            deadline = time.monotonic() + max_seconds
+            start_deadline = time.monotonic() + start_timeout
 
-        while time.monotonic() < deadline:
-            data, _ = stream.read(block_size)
-            mono = data[:, 0].copy()
-            level = _rms(mono)
-            now = time.monotonic()
+            while time.monotonic() < deadline:
+                data, _ = stream.read(block_size)
+                mono = data[:, 0].copy()
+                level = rms(mono)
+                now = time.monotonic()
 
-            if level >= threshold:
-                started = True
-                last_voice_at = now
+                if level >= threshold:
+                    started = True
+                    last_voice_at = now
 
-            if started:
-                blocks.append(mono)
-                if now - last_voice_at >= silence_seconds:
+                if started:
+                    blocks.append(mono)
+                    if now - last_voice_at >= silence_seconds:
+                        break
+                elif now >= start_deadline:
                     break
-            elif now >= start_deadline:
-                break
+    except Exception as exc:
+        raise RuntimeError(f"Microphone capture failed at {rate} Hz: {exc}") from exc
 
     if not blocks:
-        return np.empty(0, dtype=np.int16), sample_rate
-    return np.concatenate(blocks), sample_rate
+        return np.empty(0, dtype=np.int16), rate
+    return np.concatenate(blocks), rate
+
+
+def _to_16k(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray, int]:
+    """Convert capture to Whisper's 16 kHz input locally."""
+    target = 16000
+    if sample_rate == target:
+        return samples, target
+    duration = samples.size / float(sample_rate)
+    target_len = max(1, int(round(duration * target)))
+    indices = np.linspace(0, samples.size - 1, target_len)
+    converted = np.interp(indices, np.arange(samples.size), samples.astype(np.float32))
+    return converted.astype(np.int16), target
 
 
 def transcribe(samples: np.ndarray, sample_rate: int, model=None) -> str:
@@ -104,6 +151,7 @@ def transcribe(samples: np.ndarray, sample_rate: int, model=None) -> str:
     if active_model is None:
         raise RuntimeError("faster-whisper is not installed.")
 
+    samples, sample_rate = _to_16k(samples, sample_rate)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         path = f.name
 
@@ -119,6 +167,7 @@ def transcribe(samples: np.ndarray, sample_rate: int, model=None) -> str:
             beam_size=3,
             vad_filter=True,
             condition_on_previous_text=False,
+            temperature=0.0,
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
     finally:
@@ -129,13 +178,13 @@ def transcribe(samples: np.ndarray, sample_rate: int, model=None) -> str:
 
 
 def listen(existing_model=None) -> str:
-    """Capture one natural utterance and return its transcription."""
+    """Capture one utterance and return its transcription."""
     try:
         samples, rate = record_until_silence()
         text = transcribe(samples, rate, existing_model)
         if text:
-            print(f"You: {text}")
+            print(f"[JARVIS STT] You: {text}")
         return text
     except Exception as exc:
-        print(f"[Local STT] {exc}")
+        print(f"[JARVIS STT] {exc}")
         return ""
