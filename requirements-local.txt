@@ -1,5 +1,7 @@
-# Stable local Windows JARVIS runtime
+# Stable local Windows JARVIS runtime latest one
 faster-whisper>=1.1,<2
+scipy>=1.13,<2
+sounddevice>=0.5,<1
 psutil>=6,<8
 edge-tts>=7,<8
 pygame>=2.6,<3

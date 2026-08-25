@@ -13,6 +13,7 @@ import tempfile
 import time
 import wave
 from pathlib import Path
+from scipy.signal import resample_poly
 
 import numpy as np
 
@@ -36,6 +37,9 @@ from .hardware_profile import PROFILE, whisper_kwargs
 
 _MODEL = None
 _LAST_AUDIO_DETECTED = False
+MIC_DEVICE = 14
+MIC_SAMPLE_RATE = 48000
+WHISPER_SAMPLE_RATE = 16000
 
 
 def audio_was_detected() -> bool:
@@ -94,6 +98,27 @@ def _resolve_input_device():
     )
 
 
+def _resolve_sample_rate(device, requested: int) -> int:
+    """Use the requested rate when supported, otherwise negotiate a common rate."""
+    candidates = [requested, 16000, 48000, 44100, 32000, 8000]
+    seen = set()
+    for rate in candidates:
+        if rate in seen:
+            continue
+        seen.add(rate)
+        try:
+            sd.check_input_settings(
+                device=device,
+                channels=1,
+                dtype="int16",
+                samplerate=rate,
+            )
+            return rate
+        except Exception:
+            continue
+    raise RuntimeError(f"Microphone does not support any usable sample rate: {candidates}")
+
+
 def _voice_threshold(noise_rms: float) -> float:
     """Choose a speech threshold that works across quiet and noisy laptops."""
     configured = os.getenv("JARVIS_VOICE_THRESHOLD", "").strip()
@@ -108,7 +133,7 @@ def _voice_threshold(noise_rms: float) -> float:
 
 
 def record_until_silence(
-    sample_rate: int = 16000,
+    sample_rate: int = MIC_SAMPLE_RATE,
     max_seconds: float = 15.0,
     start_timeout: float = 10.0,
     silence_seconds: float = 0.80,
@@ -127,6 +152,7 @@ def record_until_silence(
     pre_roll: list[np.ndarray] = []
     noise_samples: list[np.ndarray] = []
     device = _resolve_input_device()
+    sample_rate = _resolve_sample_rate(device, sample_rate)
 
     device_name = "default"
     try:
@@ -135,7 +161,7 @@ def record_until_silence(
     except Exception:
         pass
 
-    print(f"[JARVIS STT] Listening... mic={device_name}")
+    print(f"[JARVIS STT] Listening... mic={device_name} rate={sample_rate}")
 
     try:
         with sd.InputStream(
@@ -212,6 +238,13 @@ def record_until_silence(
 def transcribe(samples: np.ndarray, sample_rate: int, model=None) -> str:
     if samples.size == 0:
         return ""
+    if sample_rate != WHISPER_SAMPLE_RATE:
+        samples = resample_poly(
+            samples.astype(np.float32),
+            WHISPER_SAMPLE_RATE,
+            sample_rate,
+        ).astype(np.int16)
+        sample_rate = WHISPER_SAMPLE_RATE
     active_model = _get_model(model)
     if active_model is None:
         raise RuntimeError("faster-whisper is not installed. Run: pip install faster-whisper")

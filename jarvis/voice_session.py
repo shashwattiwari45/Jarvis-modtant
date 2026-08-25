@@ -1,16 +1,7 @@
-"""Continuous voice-session runtime for JARVIS.
-
-Keeps one SpeechRecognition microphone session alive instead of repeatedly
-opening/calibrating the microphone for every turn. Audio is transcribed by the
-existing Whisper/Google pipeline in core.py, then sent through the existing
-local-action + tool-calling brain.
-"""
+"""Local voice-session runtime for JARVIS."""
 from __future__ import annotations
 
-import queue
 import re
-import os
-import threading
 import time
 from pathlib import Path
 
@@ -20,10 +11,7 @@ try:
 except ImportError:
     pass
 
-try:
-    import speech_recognition as sr
-except ImportError:
-    sr = None
+from . import local_stt
 
 
 WAKE_PHRASES = (
@@ -36,121 +24,30 @@ SLEEP_PHRASE = re.compile(r"\b(?:go to sleep|sleep|stand by|standby)\s+jarvis\b"
 
 
 class ContinuousVoiceSession:
-    """One persistent microphone stream feeding the existing JARVIS brain."""
+    """Feed one VAD-bounded utterance at a time into the existing JARVIS brain."""
 
     def __init__(self, core, dictation_mode=False):
         self.core = core
-        self.queue: queue.Queue = queue.Queue(maxsize=4)
-        self.stop_background = None
         self.running = False
         self.asleep = False
         self.dictation_mode = dictation_mode
-        self.speaking = threading.Event()
-        self._last_audio_at = time.monotonic()
-        self._original_speak = None
-
-    def configure_microphone(self) -> None:
-        recognizer = self.core.recognizer
-        recognizer.pause_threshold = 0.85
-        recognizer.non_speaking_duration = 0.25
-        recognizer.phrase_threshold = 0.15
-        recognizer.dynamic_energy_threshold = True
-        recognizer.dynamic_energy_adjustment_damping = 0.05
-        recognizer.dynamic_energy_ratio = 1.15
-        recognizer.operation_timeout = None
-
-    def _callback(self, recognizer, audio) -> None:
-        # The microphone remains open continuously. During any JARVIS speech,
-        # including proactive speech, discard captured audio so TTS cannot loop
-        # back into the command processor.
-        if self.speaking.is_set():
-            return
-        try:
-            self.queue.put_nowait(audio)
-            self._last_audio_at = time.monotonic()
-        except queue.Full:
-            try:
-                self.queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.queue.put_nowait(audio)
-            except queue.Full:
-                pass
-
-    def _install_speech_guard(self) -> None:
-        self._original_speak = self.core.speak
-        session = self
-        original = self._original_speak
-
-        def guarded_speak(text, force=False):
-            session.speaking.set()
-            try:
-                return original(text, force=force)
-            finally:
-                session.speaking.clear()
-                session._flush_queue()
-
-        guarded_speak._jarvis_continuous_voice_guard = True
-        self.core.speak = guarded_speak
-
-    def _restore_speech_guard(self) -> None:
-        if self._original_speak is not None:
-            self.core.speak = self._original_speak
-            self._original_speak = None
-
-    def _flush_queue(self) -> None:
-        while True:
-            try:
-                self.queue.get_nowait()
-            except queue.Empty:
-                break
 
     def start(self) -> None:
-        if not sr or not self.core.recognizer:
-            raise RuntimeError("SpeechRecognition/PyAudio is required for continuous voice mode.")
-
-        self.configure_microphone()
-        configured_device = os.getenv("JARVIS_INPUT_DEVICE", "").strip()
-        device_index = int(configured_device) if configured_device.isdigit() else None
-        self.source = sr.Microphone(device_index=device_index)
-        with self.source as source:
-            print("[JARVIS Voice] Calibrating microphone once...")
-            self.core.recognizer.adjust_for_ambient_noise(source, duration=0.8)
-            print(
-                "[JARVIS Voice] Continuous microphone active. "
-                "Speak naturally; no repeated mic startup."
-            )
-            print(f"[JARVIS Voice] Input device: {source} (index={device_index or 'default'})")
-            print(f"[JARVIS Voice] Energy threshold: {self.core.recognizer.energy_threshold:.0f}")
-
-        self._install_speech_guard()
-        self.stop_background = self.core.recognizer.listen_in_background(
-            self.source,
-            self._callback,
-            phrase_time_limit=14,
-        )
         self.running = True
 
     def stop(self) -> None:
         self.running = False
-        if self.stop_background:
-            try:
-                self.stop_background(wait_for_stop=False)
-            except Exception:
-                pass
-            self.stop_background = None
-        self._restore_speech_guard()
-        self._flush_queue()
 
-    def _transcribe(self, audio) -> str:
-        if getattr(self.core, "_whisper_model", None):
-            return self.core._listen_with_whisper(audio)
-        return self.core._listen_with_google(audio)
+    def _listen(self) -> str:
+        """Capture one VAD-bounded utterance without competing with TTS."""
+        audio_lock = getattr(self.core, "AUDIO_LOCK", None)
+        if audio_lock is None:
+            return local_stt.listen()
+        with audio_lock:
+            return local_stt.listen()
 
     def _speak(self, text: str, force: bool = True) -> None:
         self.core.speak(text, force=force)
-        # guarded_speak flushes any audio captured while the response played.
 
     def _wake_match(self, text: str) -> bool:
         return any(p.search(text) for p in WAKE_PHRASES)
@@ -223,12 +120,7 @@ class ContinuousVoiceSession:
         try:
             while self.running:
                 try:
-                    audio = self.queue.get(timeout=1.0)
-                except queue.Empty:
-                    continue
-
-                try:
-                    text = self._transcribe(audio).strip().lower()
+                    text = self._listen().strip().lower()
                 except Exception as exc:
                     print(f"[JARVIS Voice] Transcription error: {exc}")
                     continue
