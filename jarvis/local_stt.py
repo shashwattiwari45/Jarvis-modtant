@@ -33,44 +33,31 @@ def _get_model(existing=None):
     return _MODEL
 
 
-def _rms(samples: np.ndarray) -> float:
+def rms(samples: np.ndarray) -> float:
     if samples.size == 0:
         return 0.0
     x = samples.astype(np.float32)
     return float(np.sqrt(np.mean(x * x)))
 
 
-def _configured_device():
-    value = os.getenv("JARVIS_INPUT_DEVICE", "").strip()
-    if not value:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        wanted = value.casefold()
-        for index, info in enumerate(sd.query_devices()):
-            if int(info.get("max_input_channels", 0)) > 0 and wanted in str(info.get("name", "")).casefold():
-                return index
-    raise RuntimeError(f"Microphone '{value}' was not found.")
-
-
-def _open_stream(sample_rate: int, block_size: int):
+def get_input_device():
     if sd is None:
-        raise RuntimeError("sounddevice is not installed.")
-    device = _configured_device()
-    if device is None:
-        device = sd.default.device[0]
-    return sd.InputStream(
-        samplerate=sample_rate,
-        channels=1,
-        dtype="int16",
-        blocksize=block_size,
-        device=device,
-        latency="low",
-    )
+        return None
+    value = os.getenv("JARVIS_INPUT_DEVICE", "").strip()
+    if value:
+        try:
+            return int(value)
+        except ValueError:
+            wanted = value.casefold()
+            for index, info in enumerate(sd.query_devices()):
+                if int(info.get("max_input_channels", 0)) > 0 and wanted in str(info.get("name", "")).casefold():
+                    return index
+            raise RuntimeError(f"Microphone '{value}' was not found.")
+    default = sd.default.device[0]
+    return int(default) if default is not None and int(default) >= 0 else None
 
 
-def _native_input_rate(device: Optional[int]) -> int:
+def get_input_sample_rate(device: Optional[int] = None) -> int:
     if sd is None:
         return 16000
     try:
@@ -90,13 +77,11 @@ def record_until_silence(
     if sd is None:
         raise RuntimeError("sounddevice is not installed.")
 
-    device = _configured_device()
+    device = get_input_device()
     if device is None:
-        device = sd.default.device[0]
-    if device is None or int(device) < 0:
         raise RuntimeError("No input microphone is configured.")
+    rate = int(sample_rate or get_input_sample_rate(device))
 
-    rate = int(sample_rate or _native_input_rate(device))
     block_seconds = 0.1
     block_size = int(rate * block_seconds)
     calibration_blocks = max(1, int(0.5 / block_seconds))
@@ -104,12 +89,19 @@ def record_until_silence(
     noise_samples = []
 
     try:
-        with _open_stream(rate, block_size) as stream:
+        with sd.InputStream(
+            samplerate=rate,
+            channels=1,
+            dtype="int16",
+            blocksize=block_size,
+            device=device,
+            latency="low",
+        ) as stream:
             for _ in range(calibration_blocks):
                 data, _ = stream.read(block_size)
                 noise_samples.append(data[:, 0].copy())
 
-            noise = _rms(np.concatenate(noise_samples))
+            noise = rms(np.concatenate(noise_samples))
             threshold = max(350.0, noise * 2.2)
             started = False
             last_voice_at = time.monotonic()
@@ -119,7 +111,7 @@ def record_until_silence(
             while time.monotonic() < deadline:
                 data, _ = stream.read(block_size)
                 mono = data[:, 0].copy()
-                level = _rms(mono)
+                level = rms(mono)
                 now = time.monotonic()
 
                 if level >= threshold:
@@ -141,7 +133,7 @@ def record_until_silence(
 
 
 def _to_16k(samples: np.ndarray, sample_rate: int) -> tuple[np.ndarray, int]:
-    """Convert capture to Whisper's expected 16 kHz using a fast local path."""
+    """Convert capture to Whisper's 16 kHz input locally."""
     target = 16000
     if sample_rate == target:
         return samples, target
